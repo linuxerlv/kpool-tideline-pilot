@@ -101,7 +101,9 @@ function renderStats(tide) {
   const collected = game.total - game.remaining.length;
   byId('tide-panel').dataset.tide = tide;
   byId('tide-value').textContent = tide === 'high' ? '涨潮' : '退潮';
-  byId('tide-next').textContent = `${2 - game.turn % 2} 回合后${tide === 'high' ? '退潮' : '涨潮'}`;
+  byId('tide-next').textContent = tide === 'high'
+    ? `浅滩可通行 · ${2 - game.turn % 2} 回合后退潮`
+    : `浅滩封闭 · ${2 - game.turn % 2} 回合后涨潮`;
   byId('parcel-count').textContent = `${collected} / ${game.total}`;
   byId('turn-count').textContent = `${left} / ${game.level.budget}`;
   byId('turn-meter').style.width = `${left / game.level.budget * 100}%`;
@@ -183,7 +185,7 @@ function act(action) {
   if (moved) trail.add(cellKey(previous.x, previous.y));
   if (game.status === 'won') unlocked = Math.max(unlocked, Math.min(route + 1, LEVELS.length - 1));
   render(previousTide);
-  if (game.status !== 'playing') byId('result-action').focus({ preventScroll: true });
+  if (game.status !== 'playing') byId('result-action').focus();
   else if (boardFocused && moved) board.querySelector('.tile.near:not(.blocked)')?.focus({ preventScroll: true });
 }
 
@@ -191,7 +193,7 @@ for (const button of helm) button.addEventListener('click', () => act(button.dat
 byId('restart').addEventListener('click', () => start(route));
 byId('result-action').addEventListener('click', () => {
   start(game.status === 'won' && route < LEVELS.length - 1 ? route + 1 : route);
-  routeButtons[route].focus({ preventScroll: true });
+  routeButtons[route].focus();
 });
 
 document.addEventListener('keydown', (event) => {

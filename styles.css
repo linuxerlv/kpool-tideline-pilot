@@ -208,7 +208,9 @@ h1 span { color: var(--gold); }
 
 @media (max-width: 360px) {
   .helm { gap: 7px; }
-  .control-panel { gap: 0 6px; }
+  .control-panel { display: block; }
+  .control-panel h2 { margin-bottom: 4px; }
+  .shortcut { max-width: none; }
   .route { gap: 4px; }
 }
 
