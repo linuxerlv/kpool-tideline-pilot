@@ -154,8 +154,9 @@ if (( ${#needed[@]} )); then timeout 8m "$sdkmanager" --install "${needed[@]}" <
 printf 'no\n' | "$avdmanager" create avd --name tideline-pilot --package "$image" --abi x86_64
 adb_started=true
 timeout 20s "$adb" start-server
+# Keep GLES available for WebView and disable Vulkan after the hosted emulator crashed during upgrade.
 setsid "$emulator" -avd tideline-pilot -port 5554 -accel on -no-window -gpu swiftshader \
-    -no-audio -no-boot-anim -no-snapshot -no-metrics > "$scratch/emulator.log" 2>&1 &
+    -feature -Vulkan -no-audio -no-boot-anim -no-snapshot -no-metrics > "$scratch/emulator.log" 2>&1 &
 emulator_pid=$!
 boot_deadline=$((SECONDS + 300))
 until [[ $(device shell getprop sys.boot_completed 2>/dev/null) == '1' ]]; do
@@ -185,8 +186,12 @@ installed=$(installed_package)
 [[ -z $installed ]] || fail 'The fresh emulator already contains the pilot package.'
 install_flags=()
 for version in "${versions[@]}"; do
-    install_result=$(device install "${install_flags[@]}" "$scratch/$version.apk")
-    grep -Fxq 'Success' <<< "$install_result" || fail "Failed to install version $version."
+    printf 'Android pilot installing versionCode %s.\n' "$version"
+    if ! install_result=$(device install "${install_flags[@]}" "$scratch/$version.apk" 2>&1) ||
+        ! grep -Fxq 'Success' <<< "$install_result"; then
+        printf '%s\n' "$install_result" >&2
+        fail "Failed to install version $version."
+    fi
     install_flags=(-r)
     installed=$(installed_package)
     [[ $installed == "package:$package versionCode:$version" ]] || fail "Wrong installed version for $package."
@@ -219,6 +224,7 @@ for version in "${versions[@]}"; do
     jq -cn --argjson version "$version" --arg aab "$aab_sha256" --argjson installed "$installed_version" \
         '{version_code: $version, aab_sha256: $aab, installed_version_code: $installed, webview_cells: 49}' \
         >> "$scratch/builds.jsonl"
+    printf 'Android pilot verified versionCode %s offline with 49 WebView cells.\n' "$version"
 done
 
 report=$(jq -cs --arg source_sha "$GITHUB_SHA" --arg package "$package" --arg bundle_sha256 "$bundle_sha256" \
