@@ -10,9 +10,9 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' &&
       github.repository == 'linuxerlv/kpool-tideline-pilot' &&
-      github.ref == 'refs/heads/codex/tideline-desktop-launch-pilot' &&
+      github.ref == 'refs/heads/codex/tideline-desktop-launch-v2' &&
       github.event.repository.default_branch == 'main' &&
-      github.workflow_ref == 'linuxerlv/kpool-tideline-pilot/.github/workflows/windows-signature-pilot.yml@refs/heads/codex/tideline-desktop-launch-pilot' &&
+      github.workflow_ref == 'linuxerlv/kpool-tideline-pilot/.github/workflows/windows-signature-pilot.yml@refs/heads/codex/tideline-desktop-launch-v2' &&
       github.workflow_sha == github.sha
     runs-on: windows-2025
     timeout-minutes: 12
@@ -26,8 +26,8 @@ jobs:
           # GitHub expression comparisons ignore case. Check the scope exactly before checkout.
           if ($env:GITHUB_EVENT_NAME -cne 'workflow_dispatch' -or
               $env:GITHUB_REPOSITORY -cne 'linuxerlv/kpool-tideline-pilot' -or
-              $env:GITHUB_REF -cne 'refs/heads/codex/tideline-desktop-launch-pilot' -or $event.repository.default_branch -cne 'main' -or
-              $env:GITHUB_WORKFLOW_REF -cne 'linuxerlv/kpool-tideline-pilot/.github/workflows/windows-signature-pilot.yml@refs/heads/codex/tideline-desktop-launch-pilot' -or
+              $env:GITHUB_REF -cne 'refs/heads/codex/tideline-desktop-launch-v2' -or $event.repository.default_branch -cne 'main' -or
+              $env:GITHUB_WORKFLOW_REF -cne 'linuxerlv/kpool-tideline-pilot/.github/workflows/windows-signature-pilot.yml@refs/heads/codex/tideline-desktop-launch-v2' -or
               $env:GITHUB_SHA -cnotmatch '\A[0-9a-f]{40}\z' -or $env:GITHUB_WORKFLOW_SHA -cne $env:GITHUB_SHA -or
               $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or $env:RUNNER_ARCH -cne 'X64') {
             throw 'The Windows signature pilot requires a manual run from its designated pilot branch on a GitHub-hosted Windows x64 runner.'

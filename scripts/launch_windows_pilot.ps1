@@ -12,8 +12,8 @@ if ($env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_ENVIRONMENT -cne 'github-hos
     $env:RUNNER_OS -cne 'Windows' -or $env:RUNNER_ARCH -cne 'X64' -or
     $env:GITHUB_EVENT_NAME -cne 'workflow_dispatch' -or
     $env:GITHUB_REPOSITORY -cne 'linuxerlv/kpool-tideline-pilot' -or
-    $env:GITHUB_REF -cne 'refs/heads/codex/tideline-desktop-launch-pilot' -or
-    $env:GITHUB_WORKFLOW_REF -cne 'linuxerlv/kpool-tideline-pilot/.github/workflows/windows-signature-pilot.yml@refs/heads/codex/tideline-desktop-launch-pilot' -or
+    $env:GITHUB_REF -cne 'refs/heads/codex/tideline-desktop-launch-v2' -or
+    $env:GITHUB_WORKFLOW_REF -cne 'linuxerlv/kpool-tideline-pilot/.github/workflows/windows-signature-pilot.yml@refs/heads/codex/tideline-desktop-launch-v2' -or
     $env:GITHUB_SHA -cnotmatch '\A[0-9a-f]{40}\z' -or $env:GITHUB_WORKFLOW_SHA -cne $env:GITHUB_SHA) {
     throw 'Desktop launch proof requires the designated hosted Windows pilot.'
 }
@@ -37,17 +37,18 @@ public static class TidelineFileAssociation
     private static extern int AssocQueryStringW(uint flags, uint textType, string extension,
         string verb, StringBuilder output, ref uint outputLength);
 
-    public static string OpenCommand()
+    public static string Query(uint type, string verb)
     {
         uint length = 32768;
         var output = new StringBuilder((int)length);
-        int result = AssocQueryStringW(0, 1, ".html", "open", output, ref length);
+        int result = AssocQueryStringW(0, type, ".html", String.IsNullOrEmpty(verb) ? null : verb, output, ref length);
         return result == 0 ? output.ToString() : "";
     }
 
     public static void Changed()
     {
-        SHChangeNotify(0x08000000, 0, IntPtr.Zero, IntPtr.Zero);
+        // SHCNE_ASSOCCHANGED and SHCNF_FLUSH.
+        SHChangeNotify(0x08000000, 0x1000, IntPtr.Zero, IntPtr.Zero);
     }
 }
 '@
@@ -60,23 +61,21 @@ if (-not $chrome) { throw 'The hosted Windows runner has no Chrome installation.
 $profile = Join-Path $Scratch 'chrome-profile'
 $unpacked = Join-Path $Scratch 'launcher-output'
 New-Item -ItemType Directory -Path $unpacked | Out-Null
-$className = 'KpoolTidelinePilot.' + [guid]::NewGuid().ToString('N')
 $command = ('"{0}" --user-data-dir="{1}" --remote-debugging-address=127.0.0.1 ' +
     '--remote-debugging-port=0 --no-first-run --no-default-browser-check --disable-background-networking ' +
     '--disable-component-update --disable-sync --disable-extensions ' +
     '--host-resolver-rules="MAP * ~NOTFOUND, EXCLUDE localhost" "%1"') -f $chrome, $profile
-$classes = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\Classes', $true)
-$originalCommand = [TidelineFileAssociation]::OpenCommand()
-$oldExtension = $classes.OpenSubKey('.html', $true)
-$oldDefault = $null
-$oldDefaultKind = $null
-if ($null -ne $oldExtension -and $oldExtension.GetValueNames() -contains '') {
-    $oldDefault = $oldExtension.GetValue('', $null, 'DoNotExpandEnvironmentNames')
-    $oldDefaultKind = $oldExtension.GetValueKind('')
+$className = [TidelineFileAssociation]::Query(20, $null)  # ASSOCSTR_PROGID
+$originalCommand = [TidelineFileAssociation]::Query(1, 'open')  # ASSOCSTR_COMMAND
+$delegate = [TidelineFileAssociation]::Query(18, 'open')  # ASSOCSTR_DELEGATEEXECUTE
+if ($className -cnotmatch '\A[A-Za-z][A-Za-z0-9._-]{0,120}\z' -or
+    $originalCommand -notmatch '^"[^"]+\\(?:chrome|msedge|firefox|iexplore)\.exe"(?:\s|$)' -or $delegate) {
+    throw 'The hosted runner must resolve .html to a registered Win32 browser command.'
 }
 
-$extension = $launcher = $null
-$registeredClass = $registeredExtension = $false
+$openPath = "Software\Classes\$className\shell\open"
+$handler = $handlerHive = $launcher = $null
+$commandReplaced = $false
 $browserProof = $null
 
 function Get-FixtureChrome {
@@ -86,16 +85,32 @@ function Get-FixtureChrome {
 
 try {
     # Windows still invokes the unmodified launcher's ordinary ShellExecute path.
-    # The disposable runner's per-user registration gives its browser only a fresh profile and a loopback observer.
-    $registeredClass = $true
-    $openKey = $classes.CreateSubKey("$className\shell\open\command")
-    try { $openKey.SetValue('', $command, 'String') } finally { $openKey.Dispose() }
-    $registeredExtension = $true
-    $extension = $classes.CreateSubKey('.html')
-    $extension.SetValue('', $className, 'String')
+    # Match the selected ProgID's exact Windows command. UserChoice remains intact.
+    foreach ($hive in @([Microsoft.Win32.Registry]::CurrentUser, [Microsoft.Win32.Registry]::LocalMachine)) {
+        $candidate = $hive.OpenSubKey("$openPath\command", $true)
+        if ($null -eq $candidate) { continue }
+        if ($candidate.GetValue('') -ceq $originalCommand) {
+            $handler = $candidate
+            $handlerHive = $hive
+            break
+        }
+        $candidate.Dispose()
+    }
+    if ($null -eq $handler) { throw "No exact registry command found for the selected .html browser $className." }
+    $openKey = $handlerHive.OpenSubKey($openPath)
+    try {
+        if ($openKey.GetSubKeyNames() -icontains 'ddeexec' -or $openKey.GetSubKeyNames() -icontains 'DropTarget') {
+            throw "The selected .html browser $className uses a non-command shell handler."
+        }
+    } finally { $openKey.Dispose() }
+    $oldCommand = $handler.GetValue('', $null, 'DoNotExpandEnvironmentNames')
+    $oldCommandKind = $handler.GetValueKind('')
+    $commandReplaced = $true
+    $handler.SetValue('', $command, 'String')
     [TidelineFileAssociation]::Changed()
-    if ([TidelineFileAssociation]::OpenCommand() -cne $command) {
-        throw 'The runner does not resolve .html to the isolated Chromium fixture.'
+    if ([TidelineFileAssociation]::Query(20, $null) -cne $className -or
+        [TidelineFileAssociation]::Query(1, 'open') -cne $command) {
+        throw "The selected .html browser $className did not resolve to the fixture command."
     }
 
     $start = [Diagnostics.ProcessStartInfo]::new($Download)
@@ -155,20 +170,18 @@ try {
     } catch { $cleanupErrors += 'fixture processes' }
 
     try {
-        if ($registeredExtension) {
-            if ($null -ne $oldDefaultKind) { $extension.SetValue('', $oldDefault, $oldDefaultKind) }
-            elseif ($null -ne $extension) { $extension.DeleteValue('', $false) }
-        }
-        if ($null -ne $extension) { $extension.Dispose() }
-        if ($registeredExtension -and $null -eq $oldExtension) { $classes.DeleteSubKey('.html', $false) }
-        if ($null -ne $oldExtension) { $oldExtension.Dispose() }
-        if ($registeredClass) { $classes.DeleteSubKeyTree($className, $false) }
-        [TidelineFileAssociation]::Changed()
-        if ([TidelineFileAssociation]::OpenCommand() -cne $originalCommand -or $classes.OpenSubKey($className)) {
-            throw 'Fixture shell registration was not restored'
+        if ($commandReplaced) {
+            $handler.SetValue('', $oldCommand, $oldCommandKind)
+            [TidelineFileAssociation]::Changed()
+            if ($handler.GetValue('', $null, 'DoNotExpandEnvironmentNames') -cne $oldCommand -or
+                $handler.GetValueKind('') -ne $oldCommandKind -or
+                [TidelineFileAssociation]::Query(20, $null) -cne $className -or
+                [TidelineFileAssociation]::Query(1, 'open') -cne $originalCommand) {
+                throw 'Fixture shell registration was not restored'
+            }
         }
     } catch { $cleanupErrors += 'fixture shell registration' }
-    finally { $classes.Dispose() }
+    finally { if ($null -ne $handler) { $handler.Dispose() } }
 
     if ($cleanupErrors.Count -gt 0) { throw "Failed to clean up $($cleanupErrors -join ', ')." }
 }
