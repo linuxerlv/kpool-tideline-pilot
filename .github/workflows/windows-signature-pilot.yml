@@ -10,9 +10,9 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' &&
       github.repository == 'linuxerlv/kpool-tideline-pilot' &&
-      github.ref == 'refs/heads/codex/tideline-desktop-launch-v2' &&
+      github.ref == 'refs/heads/codex/tideline-desktop-a10-chain' &&
       github.event.repository.default_branch == 'main' &&
-      github.workflow_ref == 'linuxerlv/kpool-tideline-pilot/.github/workflows/windows-signature-pilot.yml@refs/heads/codex/tideline-desktop-launch-v2' &&
+      github.workflow_ref == 'linuxerlv/kpool-tideline-pilot/.github/workflows/windows-signature-pilot.yml@refs/heads/codex/tideline-desktop-a10-chain' &&
       github.workflow_sha == github.sha
     runs-on: windows-2025
     timeout-minutes: 12
@@ -26,8 +26,8 @@ jobs:
           # GitHub expression comparisons ignore case. Check the scope exactly before checkout.
           if ($env:GITHUB_EVENT_NAME -cne 'workflow_dispatch' -or
               $env:GITHUB_REPOSITORY -cne 'linuxerlv/kpool-tideline-pilot' -or
-              $env:GITHUB_REF -cne 'refs/heads/codex/tideline-desktop-launch-v2' -or $event.repository.default_branch -cne 'main' -or
-              $env:GITHUB_WORKFLOW_REF -cne 'linuxerlv/kpool-tideline-pilot/.github/workflows/windows-signature-pilot.yml@refs/heads/codex/tideline-desktop-launch-v2' -or
+              $env:GITHUB_REF -cne 'refs/heads/codex/tideline-desktop-a10-chain' -or $event.repository.default_branch -cne 'main' -or
+              $env:GITHUB_WORKFLOW_REF -cne 'linuxerlv/kpool-tideline-pilot/.github/workflows/windows-signature-pilot.yml@refs/heads/codex/tideline-desktop-a10-chain' -or
               $env:GITHUB_SHA -cnotmatch '\A[0-9a-f]{40}\z' -or $env:GITHUB_WORKFLOW_SHA -cne $env:GITHUB_SHA -or
               $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or $env:RUNNER_ARCH -cne 'X64') {
             throw 'The Windows signature pilot requires a manual run from its designated pilot branch on a GitHub-hosted Windows x64 runner.'
@@ -181,6 +181,12 @@ jobs:
             if ($launch.screenshot_sha256 -cne (Get-FileHash -Algorithm SHA256 -LiteralPath $screenshot).Hash.ToLowerInvariant()) {
               throw 'The retained screenshot does not match the Chromium observer digest.'
             }
+            $retainedPackage = Join-Path $evidence 'Tideline.exe'
+            Copy-Item -LiteralPath $download -Destination $retainedPackage
+            if ((Get-FileHash -Algorithm SHA256 -LiteralPath $retainedPackage).Hash -cne $downloadHash) {
+              throw 'The retained executable differs from the launched signed download.'
+            }
+            Assert-FixtureSignature $retainedPackage $certificateHash
             $proof = [ordered]@{
               source_sha = $downloadBundle.source_sha
               bundle_sha256 = $downloadBundle.bundle_sha256
@@ -234,11 +240,12 @@ jobs:
           $json = $proof | ConvertTo-Json -Depth 6 -Compress
           Set-Content -LiteralPath (Join-Path $evidence 'tideline-desktop-launch.json') -Value $json -Encoding utf8NoBOM
           Write-Output "KPOOL_WINDOWS_DESKTOP_LAUNCH_OK $json"
-      - name: Retain desktop launch proof
+      - name: Retain signed desktop package and launch proof
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: tideline-desktop-launch-proof
+          name: tideline-desktop-a10-chain
           path: |
+            ${{ runner.temp }}/tideline-desktop-launch-proof/Tideline.exe
             ${{ runner.temp }}/tideline-desktop-launch-proof/tideline-first-route.png
             ${{ runner.temp }}/tideline-desktop-launch-proof/tideline-desktop-launch.json
           if-no-files-found: error
