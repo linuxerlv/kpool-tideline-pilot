@@ -1,0 +1,60 @@
+name: GitHub hosted queue source
+
+on:
+  push:
+    branches: ['codex/a04-queue-pilot']
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  source:
+    name: source
+    if: >-
+      github.event_name == 'push' &&
+      github.repository == 'linuxerlv/kpool-tideline-pilot' &&
+      github.ref == 'refs/heads/codex/a04-queue-pilot' &&
+      github.workflow_ref == 'linuxerlv/kpool-tideline-pilot/.github/workflows/concurrency-pilot.yml@refs/heads/codex/a04-queue-pilot' &&
+      github.workflow_sha == github.sha
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Validate workflow scope
+        run: |
+          # GitHub expression comparisons ignore case. Check the scope exactly before checkout.
+          [[ "$GITHUB_EVENT_NAME" == 'push' ]]
+          [[ "$GITHUB_REPOSITORY" == 'linuxerlv/kpool-tideline-pilot' ]]
+          [[ "$GITHUB_REF" == 'refs/heads/codex/a04-queue-pilot' ]]
+          [[ "$GITHUB_WORKFLOW_REF" == 'linuxerlv/kpool-tideline-pilot/.github/workflows/concurrency-pilot.yml@refs/heads/codex/a04-queue-pilot' ]]
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
+          [[ "$RUNNER_ENVIRONMENT" == 'github-hosted' && "$RUNNER_OS" == 'Linux' && "$RUNNER_ARCH" == 'X64' ]]
+          jq -e --arg ref "$GITHUB_REF" --arg sha "$GITHUB_SHA" \
+            '.ref == $ref and .after == $sha and .deleted == false and .forced == false' \
+            "$GITHUB_EVENT_PATH" > /dev/null
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+      - name: Test and attest to the pushed source
+        run: |
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          marker=$(mktemp "$RUNNER_TEMP/tideline-queue-marker.XXXXXXXX")
+          trap 'rm -f -- "$marker"' EXIT
+          git cat-file blob "$GITHUB_SHA:pilot-queue-version.txt" > "$marker"
+          IFS= read -r slot < "$marker"
+          [[ "$slot" =~ ^[ABC]$ ]]
+          cmp -s "$marker" <(printf '%s\n' "$slot")
+          digest=$(sha256sum < "$marker")
+          digest=${digest%% *}
+
+          node --test tests/game.test.mjs
+          printf 'KPOOL_QUEUE_SOURCE_OK {"slot":"%s","source_sha":"%s","marker_sha256":"%s"}\n' \
+            "$slot" "$GITHUB_SHA" "$digest"
