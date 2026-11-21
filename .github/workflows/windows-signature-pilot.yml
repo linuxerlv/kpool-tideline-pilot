@@ -1,4 +1,4 @@
-name: Windows signature pilot
+name: Windows signed desktop launch pilot
 
 on:
   workflow_dispatch:
@@ -10,12 +10,12 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' &&
       github.repository == 'linuxerlv/kpool-tideline-pilot' &&
-      github.ref == 'refs/heads/main' &&
+      github.ref == 'refs/heads/codex/tideline-desktop-launch-pilot' &&
       github.event.repository.default_branch == 'main' &&
-      github.workflow_ref == 'linuxerlv/kpool-tideline-pilot/.github/workflows/windows-signature-pilot.yml@refs/heads/main' &&
+      github.workflow_ref == 'linuxerlv/kpool-tideline-pilot/.github/workflows/windows-signature-pilot.yml@refs/heads/codex/tideline-desktop-launch-pilot' &&
       github.workflow_sha == github.sha
     runs-on: windows-2025
-    timeout-minutes: 10
+    timeout-minutes: 12
     permissions:
       contents: read
     steps:
@@ -26,17 +26,17 @@ jobs:
           # GitHub expression comparisons ignore case. Check the scope exactly before checkout.
           if ($env:GITHUB_EVENT_NAME -cne 'workflow_dispatch' -or
               $env:GITHUB_REPOSITORY -cne 'linuxerlv/kpool-tideline-pilot' -or
-              $env:GITHUB_REF -cne 'refs/heads/main' -or $event.repository.default_branch -cne 'main' -or
-              $env:GITHUB_WORKFLOW_REF -cne 'linuxerlv/kpool-tideline-pilot/.github/workflows/windows-signature-pilot.yml@refs/heads/main' -or
+              $env:GITHUB_REF -cne 'refs/heads/codex/tideline-desktop-launch-pilot' -or $event.repository.default_branch -cne 'main' -or
+              $env:GITHUB_WORKFLOW_REF -cne 'linuxerlv/kpool-tideline-pilot/.github/workflows/windows-signature-pilot.yml@refs/heads/codex/tideline-desktop-launch-pilot' -or
               $env:GITHUB_SHA -cnotmatch '\A[0-9a-f]{40}\z' -or $env:GITHUB_WORKFLOW_SHA -cne $env:GITHUB_SHA -or
               $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or $env:RUNNER_ARCH -cne 'X64') {
-            throw 'The Windows signature pilot requires a manual run from its canonical main branch on a GitHub-hosted Windows x64 runner.'
+            throw 'The Windows signature pilot requires a manual run from its designated pilot branch on a GitHub-hosted Windows x64 runner.'
           }
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Sign and verify the Tideline download
+      - name: Sign, download and play Tideline on Windows
         shell: pwsh
         run: |
           function Get-BundleProof([string] $Path) {
@@ -82,12 +82,18 @@ jobs:
           $executable = Join-Path $scratch 'Tideline.exe'
           $download = Join-Path $scratch 'Tideline.download.exe'
           New-Item -ItemType Directory -Path $scratch | Out-Null
+          $evidence = Join-Path $env:RUNNER_TEMP 'tideline-desktop-launch-proof'
+          $screenshot = Join-Path $evidence 'tideline-first-route.png'
+          New-Item -ItemType Directory -Path $evidence | Out-Null
           $signer = $publicSigner = $rootStore = $null
           $trustAttempted = $false
           try {
             python scripts/build_windows.py --out $executable
             if ($LASTEXITCODE -ne 0) { throw 'Tideline Windows build failed.' }
             $originalBundle = Get-BundleProof $executable
+            if ($originalBundle.bundle_sha256 -cne '28462536054d94240127e344caf7e2505cc46076150b1f135e92ab69980cdad9') {
+              throw 'The branch payload does not match the established Tideline game bundle.'
+            }
             $unsignedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $executable).Hash
 
             # The only trust addition is the public half of this job's short-lived signing fixture.
@@ -170,9 +176,15 @@ jobs:
               throw 'Downloaded bundle proof differs from the build or Windows file version.'
             }
 
+            $launch = & ./scripts/launch_windows_pilot.ps1 -Download $download -ExpectedSha256 $downloadHash `
+              -BundleSha256 $downloadBundle.bundle_sha256 -Scratch $scratch -Screenshot $screenshot
+            if ($launch.screenshot_sha256 -cne (Get-FileHash -Algorithm SHA256 -LiteralPath $screenshot).Hash.ToLowerInvariant()) {
+              throw 'The retained screenshot does not match the Chromium observer digest.'
+            }
             $proof = [ordered]@{
               source_sha = $downloadBundle.source_sha
               bundle_sha256 = $downloadBundle.bundle_sha256
+              unsigned_sha256 = $unsignedHash.ToLowerInvariant()
               signed_sha256 = $signedHash.ToLowerInvariant()
               download_sha256 = $downloadHash.ToLowerInvariant()
               certificate_sha256 = $certificateHash.ToLowerInvariant()
@@ -180,25 +192,54 @@ jobs:
               package_version = $fileVersion
               arch = 'x64'
               http_status = [int] $httpStatus
+              signer = 'ephemeral fixture'
+              run_id = [long] $env:GITHUB_RUN_ID
+              run_attempt = [int] $env:GITHUB_RUN_ATTEMPT
+              launch = $launch
             }
           } finally {
             $cleanupErrors = @()
             if ($trustAttempted) {
-              try { $rootStore.Remove($publicSigner) } catch { $cleanupErrors += 'fixture trust' }
+              try {
+                $rootStore.Remove($publicSigner)
+                if ($rootStore.Certificates.Find('FindByThumbprint', $publicSigner.Thumbprint, $false).Count) {
+                  throw 'Fixture trust still present.'
+                }
+              } catch { $cleanupErrors += 'fixture trust' }
             }
             if ($null -ne $rootStore) { $rootStore.Dispose() }
             if ($null -ne $publicSigner) { $publicSigner.Dispose() }
             if ($null -ne $signer) {
-              try { Remove-Item -Path "Cert:\CurrentUser\My\$($signer.Thumbprint)" -DeleteKey }
-              catch { $cleanupErrors += 'fixture certificate and key' }
+              try {
+                $signerPath = "Cert:\CurrentUser\My\$($signer.Thumbprint)"
+                Remove-Item -LiteralPath $signerPath -DeleteKey
+                if (Test-Path -LiteralPath $signerPath) { throw 'Fixture signer still present.' }
+              } catch { $cleanupErrors += 'fixture certificate and key' }
               $signer.Dispose()
             }
             try {
-              foreach ($path in @($executable, $download)) {
-                if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path }
+              $resolvedScratch = [IO.Path]::GetFullPath($scratch)
+              $expectedScratch = [IO.Path]::GetFullPath((Join-Path $env:RUNNER_TEMP "tideline-signature-$fixtureId"))
+              if ($resolvedScratch -cne $expectedScratch -or
+                  ((Get-Item -LiteralPath $resolvedScratch).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                throw 'Unexpected scratch path.'
               }
-              [IO.Directory]::Delete($scratch)
+              [IO.Directory]::Delete($resolvedScratch, $true)
+              if (Test-Path -LiteralPath $scratch) { throw 'Fixture scratch still present.' }
             } catch { $cleanupErrors += 'scratch files' }
             if ($cleanupErrors.Count -gt 0) { throw "Failed to clean up $($cleanupErrors -join ', ')." }
           }
-          Write-Output "KPOOL_WINDOWS_SIGNATURE_OK $($proof | ConvertTo-Json -Compress)"
+          $proof.certificate_trust_removed = $true
+          $proof.scratch_removed = $true
+          $json = $proof | ConvertTo-Json -Depth 6 -Compress
+          Set-Content -LiteralPath (Join-Path $evidence 'tideline-desktop-launch.json') -Value $json -Encoding utf8NoBOM
+          Write-Output "KPOOL_WINDOWS_DESKTOP_LAUNCH_OK $json"
+      - name: Retain desktop launch proof
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: tideline-desktop-launch-proof
+          path: |
+            ${{ runner.temp }}/tideline-desktop-launch-proof/tideline-first-route.png
+            ${{ runner.temp }}/tideline-desktop-launch-proof/tideline-desktop-launch.json
+          if-no-files-found: error
+          retention-days: 7
