@@ -13,7 +13,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 
 SCOPE_REPO = "linuxerlv/kpool-tideline-pilot"
-SCOPE_REF = "refs/heads/codex/tideline-ssh-native-pilot"
+SCOPE_REF = "refs/heads/codex/tideline-ssh-native-v2"
 SCOPE_WORKFLOW = f"{SCOPE_REPO}/.github/workflows/oidc-probe.yml@{SCOPE_REF}"
 PHYSICAL_KEY = "tideline/ssh-native-pilot"
 

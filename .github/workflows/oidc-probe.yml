@@ -9,7 +9,7 @@ jobs:
   publish:
     if: >-
       github.repository == 'linuxerlv/kpool-tideline-pilot' &&
-      github.ref == 'refs/heads/codex/tideline-ssh-native-pilot' &&
+      github.ref == 'refs/heads/codex/tideline-ssh-native-v2' &&
       github.ref_protected && github.workflow_sha == github.sha
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -53,11 +53,11 @@ jobs:
     needs: publish
     if: >-
       github.repository == 'linuxerlv/kpool-tideline-pilot' &&
-      github.ref == 'refs/heads/codex/tideline-ssh-native-pilot' &&
+      github.ref == 'refs/heads/codex/tideline-ssh-native-v2' &&
       github.ref_protected && github.workflow_sha == github.sha
     runs-on: ubuntu-24.04
     timeout-minutes: 6
-    environment: tideline-restricted-ssh-native-pilot
+    environment: tideline-restricted-ssh-native-v2
     permissions:
       contents: read
       id-token: write
