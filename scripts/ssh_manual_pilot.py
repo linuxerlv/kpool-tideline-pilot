@@ -5,6 +5,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -14,7 +15,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 REPO = "linuxerlv/kpool-tideline-pilot"
 REPOSITORY = "1466251904"
-REF = "refs/heads/codex/tideline-ssh-manual-v3"
+REF = "refs/heads/codex/tideline-ssh-key-rotation"
 WORKFLOW = f"{REPO}/.github/workflows/oidc-probe.yml@{REF}"
 TARGET = "tgt_tideline_ssh_manual_20261121"
 SOURCE = "8bf75f94e2fe206ad21509f0cbc6dfc50e90a387"
@@ -83,7 +84,7 @@ def approved_command(directory):
     }
 
 
-def target(directory, token, role, command, *, denied=False):
+def target(directory, token, role, command, *, denied=False, epoch="old", revoked=False):
     username = os.environ[f"PILOT_{role.upper()}_USER"]
     assert re.fullmatch(r"[a-z_][a-z0-9_]+", username)
     host = os.environ["PILOT_HOST"]
@@ -92,7 +93,7 @@ def target(directory, token, role, command, *, denied=False):
     process = subprocess.run(
         (
             "/usr/bin/ssh", "-F", "/dev/null", "-T", "-i",
-            str(Path(os.environ["RUNNER_TEMP"]) / "tideline-keys" / role),
+            str(Path(os.environ["RUNNER_TEMP"]) / "tideline-keys" / f"{role}-{epoch}"),
             "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none",
             "-o", "IdentityFile=none", "-o", "StrictHostKeyChecking=yes", "-o",
             "GlobalKnownHostsFile=/dev/null", "-o", f"UserKnownHostsFile={directory / 'hosts'}",
@@ -102,6 +103,10 @@ def target(directory, token, role, command, *, denied=False):
         input=json.dumps(envelope).encode(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         timeout=42, check=False, env={},
     )
+    if revoked:
+        assert process.returncode == 255 and not process.stdout
+        assert b"Permission denied (publickey)" in process.stderr
+        return None
     if denied:
         assert process.returncode == 1 and not process.stdout
         assert b"SSH target command denied" in process.stderr
@@ -155,13 +160,42 @@ def exercise(directory, command):
     assert (record["action_id"], record["origin_run_id"], record["origin_run_attempt"], record["source_sha"]) == (
         command["request_id"], run_id, attempt, SOURCE,
     )
-    replay = target(directory, oidc(), "command", command)
-    assert replay["status"] == "applied" and replay["generation"] == 1 and replay["observed_artifact"] == ARTIFACT
-    assert target(directory, oidc(), "query", query) == measured
-    print("KPOOL_SIGNED_SSH_PROOF=" + json.dumps({
+    return {
         "execution_sha": os.environ["GITHUB_SHA"], "signature_verified": True, "tamper_denied": True,
-        "query_write_denied": True, "command_replay": True, "admitted": admitted, "terminal": measured,
-        "status_transport_retries": read_errors,
+        "run_id": run_id, "run_attempt": attempt, "query_write_denied": True,
+        "admitted": admitted, "terminal": measured, "status_transport_retries": read_errors,
+        "original_command": command,
+    }
+
+
+def after_rotation(directory, baseline):
+    command = baseline["original_command"]
+    measured = baseline["terminal"]
+    query = {**BASE, "kind": "status", "query_id": "signed-status", "lookup_request_id": command["request_id"]}
+    assert (baseline["execution_sha"], baseline["run_id"], baseline["run_attempt"]) == (
+        os.environ["GITHUB_SHA"], os.environ["GITHUB_RUN_ID"], int(os.environ["GITHUB_RUN_ATTEMPT"]),
+    )
+    deadline = time.monotonic() + 310
+    while time.monotonic() < deadline:
+        try:
+            current = target(directory, oidc(), "query", query, epoch="new")
+        except (RuntimeError, subprocess.TimeoutExpired):
+            time.sleep(5)
+            continue
+        break
+    else:
+        raise TimeoutError("The enrolled replacement reader did not authenticate")
+    assert current == measured
+    target(directory, oidc(), "query", query, revoked=True)
+    target(directory, oidc(), "command", command, revoked=True)
+    target(directory, oidc(), "query", command, epoch="new", denied=True)
+    replay = target(directory, oidc(), "command", command, epoch="new")
+    assert (replay["status"], replay["generation"], replay["observed_artifact"]) == ("applied", 1, ARTIFACT)
+    assert target(directory, oidc(), "query", query, epoch="new") == measured
+    print("KPOOL_SSH_ROTATION_PROOF=" + json.dumps({
+        "execution_sha": baseline["execution_sha"], "run_id": baseline["run_id"], "run_attempt": baseline["run_attempt"],
+        "request_id": command["request_id"], "old_reader_revoked": True, "old_writer_revoked": True,
+        "replacement_reader_separated": True, "original_request_replay": True, "terminal": measured,
     }, sort_keys=True), flush=True)
 
 
@@ -170,11 +204,18 @@ def main():
     assert os.environ["GITHUB_REF"] == REF and os.environ["GITHUB_REF_PROTECTED"] == "true"
     assert os.environ["GITHUB_WORKFLOW_REF"] == WORKFLOW and os.environ["GITHUB_EVENT_NAME"] == "workflow_dispatch"
     os.umask(0o077)
+    saved = Path(os.environ["RUNNER_TEMP"]) / "tideline-rotation-baseline.json"
     with TemporaryDirectory(dir=os.environ["RUNNER_TEMP"]) as root:
         directory = Path(root)
-        command = approved_command(directory)
         (directory / "hosts").write_text(os.environ["PILOT_KNOWN_HOSTS"].strip() + "\n")
-        exercise(directory, command)
+        mode, = sys.argv[1:]
+        if mode == "before":
+            baseline = exercise(directory, approved_command(directory))
+            saved.write_text(json.dumps(baseline, sort_keys=True), encoding="utf-8")
+        elif mode == "after":
+            after_rotation(directory, json.loads(saved.read_text(encoding="utf-8")))
+        else:
+            raise ValueError("Expected the before or after rotation phase")
 
 
 if __name__ == "__main__":

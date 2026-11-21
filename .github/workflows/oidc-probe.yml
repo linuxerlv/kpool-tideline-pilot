@@ -1,4 +1,4 @@
-name: Signed ordinary SSH deployment pilot
+name: SSH credential rotation pilot
 run-name: kpool:7a24f48d35a2da4be11f3a66c2ea09d4
 
 on:
@@ -10,11 +10,11 @@ jobs:
   deliver:
     if: >-
       github.repository == 'linuxerlv/kpool-tideline-pilot' &&
-      github.ref == 'refs/heads/codex/tideline-ssh-manual-v3' &&
+      github.ref == 'refs/heads/codex/tideline-ssh-key-rotation' &&
       github.ref_protected && github.workflow_sha == github.sha
     runs-on: ubuntu-24.04
     timeout-minutes: 16
-    environment: tideline-restricted-ssh-manual-v3
+    environment: tideline-ssh-key-rotation
     permissions:
       contents: read
       id-token: write
@@ -35,10 +35,12 @@ jobs:
       - name: Generate disposable SSH identities
         run: |
           umask 077
-          mkdir -m 700 "$RUNNER_TEMP/tideline-keys" "$RUNNER_TEMP/tideline-public-keys"
+          mkdir -m 700 "$RUNNER_TEMP/tideline-keys" "$RUNNER_TEMP/tideline-public-keys" "$RUNNER_TEMP/tideline-replacement-keys"
           for role in query command; do
-            ssh-keygen -q -t ed25519 -N '' -C "tideline-${GITHUB_RUN_ID}-${role}" -f "$RUNNER_TEMP/tideline-keys/$role"
-            mv "$RUNNER_TEMP/tideline-keys/$role.pub" "$RUNNER_TEMP/tideline-public-keys/$role.pub"
+            ssh-keygen -q -t ed25519 -N '' -C "tideline-${GITHUB_RUN_ID}-${role}" -f "$RUNNER_TEMP/tideline-keys/$role-old"
+            ssh-keygen -q -t ed25519 -N '' -C "tideline-${GITHUB_RUN_ID}-${role}-replacement" -f "$RUNNER_TEMP/tideline-keys/$role-new"
+            mv "$RUNNER_TEMP/tideline-keys/$role-old.pub" "$RUNNER_TEMP/tideline-public-keys/$role.pub"
+            mv "$RUNNER_TEMP/tideline-keys/$role-new.pub" "$RUNNER_TEMP/tideline-replacement-keys/$role.pub"
           done
       - name: Publish only the public keys for exact-run enrollment
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
@@ -61,10 +63,31 @@ jobs:
           KPOOL_TARGET_CONTEXT: ${{ vars.KPOOL_TARGET_CONTEXT }}
           KPOOL_AUTHORIZATION: ${{ vars.KPOOL_AUTHORIZATION }}
           KPOOL_DISPATCH_PUBLIC_KEY: ${{ vars.KPOOL_DISPATCH_PUBLIC_KEY }}
-        run: python3 -B scripts/ssh_manual_pilot.py
+        run: python3 -B scripts/ssh_manual_pilot.py before
+      - name: Publish only replacement public keys and pre-rotation evidence
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: tideline-rotation-ready
+          path: |
+            ${{ runner.temp }}/tideline-replacement-keys/query.pub
+            ${{ runner.temp }}/tideline-replacement-keys/command.pub
+            ${{ runner.temp }}/tideline-rotation-baseline.json
+          if-no-files-found: error
+          retention-days: 3
+      - name: Verify revocation and continuity under the replacement keys
+        env:
+          PILOT_HOST: ${{ vars.KPOOL_SSH_HOST }}
+          PILOT_KNOWN_HOSTS: ${{ vars.KPOOL_SSH_KNOWN_HOSTS }}
+          PILOT_QUERY_USER: ${{ vars.KPOOL_SSH_QUERY_USER }}
+          PILOT_COMMAND_USER: ${{ vars.KPOOL_SSH_COMMAND_USER }}
+        run: python3 -B scripts/ssh_manual_pilot.py after
       - name: Remove runner-only disposable keys
         if: always()
         run: |
-          rm -f -- "$RUNNER_TEMP/tideline-keys/query" "$RUNNER_TEMP/tideline-keys/command"
-          test ! -e "$RUNNER_TEMP/tideline-keys/query"
-          test ! -e "$RUNNER_TEMP/tideline-keys/command"
+          for role in query command; do
+            for epoch in old new; do
+              key="$RUNNER_TEMP/tideline-keys/$role-$epoch"
+              rm -f -- "$key"
+              test ! -e "$key"
+            done
+          done
