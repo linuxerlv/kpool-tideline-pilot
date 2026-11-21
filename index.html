@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#091821">
+    <meta name="description" content="在潮汐间驾驶小船，收齐邮包并安全回港。">
+    <title>潮汐邮差 · TIDELINE</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="./styles.css">
+    <script src="./game.mjs" type="module"></script>
+  </head>
+  <body>
+    <main class="application">
+      <header class="masthead">
+        <div class="brand"><span class="brand-mark" aria-hidden="true"><i></i></span><span>TIDELINE</span></div>
+        <button class="restart" id="restart" type="button"><span aria-hidden="true">↻</span> 重开本关</button>
+      </header>
+
+      <section class="intro" aria-labelledby="game-title">
+        <div><h1 id="game-title">潮汐邮差<span>。</span></h1><p>收齐海上的邮包，在航程耗尽前驶回码头。</p></div>
+        <nav class="routes" id="routes" aria-label="航线选择"></nav>
+      </section>
+
+      <div class="game-layout">
+        <section class="chart-panel" aria-labelledby="route-title">
+          <header class="chart-head">
+            <div><div class="route-name" id="route-name"></div><h2 id="route-title"></h2></div>
+            <div class="compass" aria-hidden="true"><span>N</span><i></i></div>
+          </header>
+          <div class="chart-frame">
+            <div class="columns" aria-hidden="true"><span>A</span><span>B</span><span>C</span><span>D</span><span>E</span><span>F</span><span>G</span></div>
+            <div class="rows" aria-hidden="true"><span>1</span><span>2</span><span>3</span><span>4</span><span>5</span><span>6</span><span>7</span></div>
+            <div class="board" id="board" role="group" aria-label="航图"></div>
+          </div>
+          <ul class="legend" aria-label="航图图例">
+            <li><span class="legend-boat"></span> 邮船</li>
+            <li><span class="legend-dock"></span> 码头</li>
+            <li><span class="legend-parcel"></span> 邮包</li>
+            <li><span class="legend-shallow"></span> 浅滩</li>
+            <li><span class="legend-rock"></span> 礁石</li>
+          </ul>
+        </section>
+
+        <aside class="cockpit" aria-label="航行状态与操控">
+          <section class="status-panel tide-panel" id="tide-panel" aria-labelledby="tide-label">
+            <div class="stat-label" id="tide-label">当前潮位</div>
+            <div class="tide-value" id="tide-value"></div>
+            <p id="tide-next"></p>
+            <span class="tide-ornament" aria-hidden="true"><i></i><i></i><i></i></span>
+          </section>
+          <section class="status-panel score-panel" aria-label="航程记录">
+            <div class="score-row"><span>收取邮包</span><strong id="parcel-count"></strong></div>
+            <div class="parcel-meter" id="parcel-meter" aria-hidden="true"></div>
+            <div class="score-row turns"><span>剩余航程</span><strong id="turn-count"></strong></div>
+            <div class="turn-meter" aria-hidden="true"><i id="turn-meter"></i></div>
+          </section>
+          <section class="status-panel control-panel" aria-labelledby="helm-title">
+            <h2 id="helm-title">操舵</h2>
+            <div class="helm">
+              <div class="dpad" aria-label="移动方向">
+                <button type="button" class="north" data-action="north" aria-label="向北"><span aria-hidden="true">↑</span></button>
+                <button type="button" class="west" data-action="west" aria-label="向西"><span aria-hidden="true">←</span></button>
+                <button type="button" class="south" data-action="south" aria-label="向南"><span aria-hidden="true">↓</span></button>
+                <button type="button" class="east" data-action="east" aria-label="向东"><span aria-hidden="true">→</span></button>
+              </div>
+              <button type="button" class="wait" data-action="wait"><span aria-hidden="true">◷</span> 等待一回合</button>
+            </div>
+            <p class="shortcut">方向键或 WASD 移动 · 空格等待</p>
+          </section>
+          <section class="logbook" id="logbook" aria-live="polite" aria-atomic="true">
+            <span class="log-marker" aria-hidden="true"></span>
+            <p id="log"></p>
+          </section>
+          <section class="result" id="result" aria-labelledby="result-title" hidden>
+            <h2 id="result-title"></h2>
+            <p id="result-caption"></p>
+            <button class="primary" id="result-action" type="button"></button>
+          </section>
+        </aside>
+      </div>
+
+      <details class="instructions">
+        <summary>航行规则</summary>
+        <ol>
+          <li>每次前进一格或等待消耗一回合，潮位每两回合变化一次。</li>
+          <li>只有涨潮时才能进入浅滩。退潮后仍可驶离浅滩。碰壁、碰礁或试闯干涸浅滩时不扣航程。</li>
+          <li>驶入邮包所在的格子即收取。收齐邮包并回到起始码头才能完成航线。</li>
+        </ol>
+      </details>
+      <noscript><p>请启用 JavaScript 后出航。</p></noscript>
+    </main>
+  </body>
+</html>
