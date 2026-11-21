@@ -13,7 +13,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 
 SCOPE_REPO = "linuxerlv/kpool-tideline-pilot"
-SCOPE_REF = "refs/heads/codex/tideline-ssh-native-v2"
+SCOPE_REF = "refs/heads/codex/tideline-hosted-offboarding"
 SCOPE_WORKFLOW = f"{SCOPE_REPO}/.github/workflows/oidc-probe.yml@{SCOPE_REF}"
 PHYSICAL_KEY = "tideline/ssh-native-pilot"
 
@@ -46,14 +46,14 @@ def request(directory, token, role, command, *, denied=False):
     envelope = {"schema_version": 1, "command": command, "oidc_token": token}
     process = subprocess.run(
         (
-            "/usr/bin/ssh", "-F", "/dev/null", "-T", "-i", str(directory / role),
+            "/usr/bin/ssh", "-F", "/dev/null", "-T", "-i", str(Path(os.environ["RUNNER_TEMP"]) / "tideline-keys" / role),
             "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none",
             "-o", "IdentityFile=none", "-o", "StrictHostKeyChecking=yes",
             "-o", "GlobalKnownHostsFile=/dev/null", "-o", f"UserKnownHostsFile={directory / 'hosts'}",
             "-o", "ClearAllForwardings=yes", "-o", "ConnectTimeout=12",
             "-o", "PreferredAuthentications=publickey", "--", f"{username}@{host}", "kpool-target-v1",
         ),
-        input=json.dumps(envelope).encode(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        input=json.dumps(envelope).encode(), capture_output=True,
         timeout=42, check=False, env={},
     )
     if denied:
@@ -68,8 +68,20 @@ def request(directory, token, role, command, *, denied=False):
     return reply
 
 
-def exercise(directory, token, base, source, repository, artifact, run_id, attempt):
-    preflight = request(directory, token, "query", {**base, "kind": "preflight", "query_id": "native-preflight"})
+def wait_for_enrollment(directory, base):
+    command = {**base, "kind": "preflight", "query_id": "native-preflight"}
+    end = time.monotonic() + 360
+    while time.monotonic() < end:
+        token = oidc(base["target_id"])
+        try:
+            return token, request(directory, token, "query", command)
+        except (RuntimeError, subprocess.TimeoutExpired):
+            time.sleep(5)
+    raise TimeoutError("The run's independent query identity was not enrolled")
+
+
+def exercise(directory, base, source, repository, artifact, run_id, attempt):
+    token, preflight = wait_for_enrollment(directory, base)
     assert (preflight["status"], preflight["policy_revision"], preflight["generation"]) == ("applied", "p1", 0)
     action = request_id(repository, source)
     command = {
@@ -85,9 +97,13 @@ def exercise(directory, token, base, source, repository, artifact, run_id, attem
     accepted = request(directory, token, "native", command)
     assert (accepted["status"], accepted["reason_code"], accepted["generation"]) == ("accepted", "QUEUED", 0)
     query = {**base, "kind": "status", "query_id": "native-status", "lookup_request_id": action}
-    deadline = time.monotonic() + 100
+    deadline = time.monotonic() + 280
     while time.monotonic() < deadline:
-        applied = request(directory, token, "query", query)
+        try:
+            applied = request(directory, oidc(base["target_id"]), "query", query)
+        except (RuntimeError, subprocess.TimeoutExpired):
+            time.sleep(5)
+            continue
         if applied["status"] == "applied":
             break
         if applied["status"] in {"not_applied", "rejected"}:
@@ -98,14 +114,14 @@ def exercise(directory, token, base, source, repository, artifact, run_id, attem
     assert (applied["generation"], applied["verification"], applied["observed_artifact"]) == (1, "passed", artifact)
     record, = [record for record in applied["ledger_records"] if record["action_id"] == action]
     assert (record["origin_run_id"], record["origin_run_attempt"], record["source_sha"]) == (run_id, attempt, source)
-    replay = request(directory, token, "native", command)
+    replay = request(directory, oidc(base["target_id"]), "native", command)
     assert (replay["status"], replay["generation"], replay["observed_artifact"]) == ("applied", 1, artifact)
-    assert request(directory, token, "query", query) == applied
+    assert request(directory, oidc(base["target_id"]), "query", query) == applied
     print("KPOOL_SSH_NATIVE_PROOF=" + json.dumps({
         "target_id": base["target_id"], "action_id": action, "artifact": artifact,
         "generation": applied["generation"], "run_id": run_id, "run_attempt": attempt,
         "source_sha": source, "query_role_write_rejected": True, "mismatched_source_rejected": True,
-        "same_command_replayed": True, "ledger_record": record,
+        "same_command_replayed": True, "ledger_record": record, "local_policy": preflight["policy_revision"],
     }, sort_keys=True), flush=True)
 
 
@@ -114,6 +130,7 @@ def main():
     assert os.environ["GITHUB_REF"] == SCOPE_REF and os.environ["GITHUB_REF_PROTECTED"] == "true"
     assert os.environ["GITHUB_WORKFLOW_REF"] == SCOPE_WORKFLOW
     assert os.environ["GITHUB_EVENT_NAME"] == "workflow_dispatch"
+    assert not any(name in os.environ for name in ("KPOOL_API", "KPOOL_INTENT", "KPOOL_AUTHORIZATION", "KPOOL_GITHUB_APP_ID"))
     target = os.environ["PILOT_TARGET"]
     artifact, source = os.environ["PILOT_ARTIFACT"], os.environ["GITHUB_SHA"]
     repository = os.environ["GITHUB_REPOSITORY_ID"]
@@ -121,15 +138,11 @@ def main():
     assert repository == "1466251904" and re.fullmatch(r"[0-9a-f]{40}", source)
     assert re.fullmatch(r"sha256:[0-9a-f]{64}", artifact) and attempt > 0 and run_id.isdecimal()
     base = {"schema_version": 1, "target_id": target}
-    token = oidc(target)
     os.umask(0o077)
     with TemporaryDirectory(dir=os.environ["RUNNER_TEMP"]) as root:
         directory = Path(root)
         (directory / "hosts").write_text(os.environ["PILOT_KNOWN_HOSTS"].strip() + "\n")
-        for role in ("query", "native"):
-            key = os.environ.pop(f"PILOT_{role.upper()}_KEY").strip().replace("\r\n", "\n")
-            (directory / role).write_text(key + "\n")
-        exercise(directory, token, base, source, repository, artifact, run_id, attempt)
+        exercise(directory, base, source, repository, artifact, run_id, attempt)
 
 
 if __name__ == "__main__":

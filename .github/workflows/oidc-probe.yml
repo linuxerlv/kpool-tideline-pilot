@@ -1,4 +1,4 @@
-name: Restricted SSH native deployment pilot
+name: Protected native delivery after a Std app detach
 
 on:
   workflow_dispatch:
@@ -9,7 +9,7 @@ jobs:
   publish:
     if: >-
       github.repository == 'linuxerlv/kpool-tideline-pilot' &&
-      github.ref == 'refs/heads/codex/tideline-ssh-native-v2' &&
+      github.ref == 'refs/heads/codex/tideline-hosted-offboarding' &&
       github.ref_protected && github.workflow_sha == github.sha
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -53,11 +53,11 @@ jobs:
     needs: publish
     if: >-
       github.repository == 'linuxerlv/kpool-tideline-pilot' &&
-      github.ref == 'refs/heads/codex/tideline-ssh-native-v2' &&
+      github.ref == 'refs/heads/codex/tideline-hosted-offboarding' &&
       github.ref_protected && github.workflow_sha == github.sha
     runs-on: ubuntu-24.04
-    timeout-minutes: 6
-    environment: tideline-restricted-ssh-native-v2
+    timeout-minutes: 12
+    environment: tideline-hosted-offboarding
     permissions:
       contents: read
       id-token: write
@@ -66,6 +66,23 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Generate Runner-local disposable SSH identities
+        run: |
+          umask 077
+          mkdir -m 700 "$RUNNER_TEMP/tideline-keys" "$RUNNER_TEMP/tideline-public-keys"
+          for role in query native; do
+            ssh-keygen -q -t ed25519 -N '' -C "tideline-${GITHUB_RUN_ID}-${role}" -f "$RUNNER_TEMP/tideline-keys/$role"
+            mv "$RUNNER_TEMP/tideline-keys/$role.pub" "$RUNNER_TEMP/tideline-public-keys/$role.pub"
+          done
+      - name: Publish only the public keys for exact-run enrollment
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        with:
+          name: tideline-ssh-public-keys
+          path: |
+            ${{ runner.temp }}/tideline-public-keys/query.pub
+            ${{ runner.temp }}/tideline-public-keys/native.pub
+          if-no-files-found: error
+          retention-days: 1
       - name: Admit the native revision through the restricted SSH gateway
         env:
           PILOT_HOST: ${{ vars.KPOOL_SSH_HOST }}
@@ -73,7 +90,11 @@ jobs:
           PILOT_QUERY_USER: ${{ vars.KPOOL_SSH_QUERY_USER }}
           PILOT_NATIVE_USER: ${{ vars.KPOOL_SSH_NATIVE_USER }}
           PILOT_TARGET: ${{ vars.KPOOL_SSH_TARGET_ID }}
-          PILOT_QUERY_KEY: ${{ secrets.KPOOL_SSH_QUERY_KEY }}
-          PILOT_NATIVE_KEY: ${{ secrets.KPOOL_SSH_NATIVE_KEY }}
           PILOT_ARTIFACT: ${{ needs.publish.outputs.digest }}
         run: python3 -B scripts/ssh_native_pilot.py
+      - name: Remove Runner-local disposable identities
+        if: always()
+        run: |
+          rm -f -- "$RUNNER_TEMP/tideline-keys/query" "$RUNNER_TEMP/tideline-keys/native"
+          test ! -e "$RUNNER_TEMP/tideline-keys/query"
+          test ! -e "$RUNNER_TEMP/tideline-keys/native"
