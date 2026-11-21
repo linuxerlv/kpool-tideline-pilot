@@ -1,4 +1,4 @@
-name: GitHub OIDC identity probe
+name: Restricted SSH target probe
 
 on:
   workflow_dispatch:
@@ -10,24 +10,75 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' &&
       github.repository == 'linuxerlv/kpool-tideline-pilot' &&
-      github.ref == 'refs/heads/main' &&
-      github.event.repository.default_branch == 'main'
+      github.ref == 'refs/heads/codex/tideline-ssh-pilot' &&
+      github.ref_protected
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    environment: tideline-oidc-probe
+    environment: tideline-restricted-ssh-pilot
     permissions:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-      - name: Install pinned signature verification dependencies
+      - name: Verify the read-only SSH gateway
+        env:
+          PILOT_HOST: ${{ vars.KPOOL_SSH_HOST }}
+          PILOT_KNOWN_HOSTS: ${{ vars.KPOOL_SSH_KNOWN_HOSTS }}
+          PILOT_USER: ${{ vars.KPOOL_SSH_QUERY_USER }}
+          PILOT_TARGET: ${{ vars.KPOOL_SSH_TARGET_ID }}
+          PILOT_KEY: ${{ secrets.KPOOL_SSH_QUERY_KEY }}
         run: |
-          python3 -m venv "$RUNNER_TEMP/tideline-oidc-venv"
-          "$RUNNER_TEMP/tideline-oidc-venv/bin/python" -m pip install \
-            --disable-pip-version-check --only-binary=:all: --no-deps \
-            'PyJWT==2.15.1' 'cryptography==50.0.2' 'cffi==2.1.1' 'pycparser==3.12'
-      - name: Verify the GitHub-issued identity
-        run: '"$RUNNER_TEMP/tideline-oidc-venv/bin/python" scripts/oidc_probe.py'
+          python3 - <<'PY'
+          import base64
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          from tempfile import TemporaryDirectory
+          from urllib.parse import urlencode
+          from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+          class NoRedirects(HTTPRedirectHandler):
+              def redirect_request(self, *args, **kwargs):
+                  return None
+
+          target = os.environ["PILOT_TARGET"]
+          token_url = os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"]
+          separator = "&" if "?" in token_url else "?"
+          request = Request(token_url + separator + urlencode({"audience": f"kpool-target:{target}"}),
+                            headers={"Authorization": "Bearer " + os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]})
+          with build_opener(NoRedirects()).open(request, timeout=10) as response:
+              jwt = json.load(response)["value"]
+          payload = jwt.split(".")[1]
+          claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+          print("GitHub identity fields:", json.dumps({field: claims.get(field) for field in (
+              "event_name", "ref", "ref_type", "ref_protected", "environment", "repository_id", "workflow_ref",
+          )}), flush=True)
+          query = {"schema_version": 1, "kind": "preflight", "target_id": target, "query_id": "hosted-ssh-preflight"}
+          envelope = {"schema_version": 1, "command": query, "oidc_token": jwt}
+          os.umask(0o077)
+          with TemporaryDirectory(dir=os.environ["RUNNER_TEMP"]) as scratch:
+              key = Path(scratch) / "ssh-key"
+              pins = Path(scratch) / "known-hosts"
+              key.write_text(os.environ.pop("PILOT_KEY").strip() + "\n")
+              pins.write_text(os.environ["PILOT_KNOWN_HOSTS"].strip() + "\n")
+              ssh = (
+                  "ssh", "-F", "/dev/null", "-T", "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
+                  "-o", "IdentityAgent=none", "-o", "IdentityFile=none", "-o", "StrictHostKeyChecking=yes",
+                  "-o", "GlobalKnownHostsFile=/dev/null", "-o", f"UserKnownHostsFile={pins}",
+                  "-o", "ClearAllForwardings=yes", "-o", "ConnectTimeout=12", "-o", "PreferredAuthentications=publickey",
+                  "-i", str(key), "--", os.environ["PILOT_USER"] + "@" + os.environ["PILOT_HOST"],
+              )
+              def call(command):
+                  return subprocess.run((*ssh, command), input=json.dumps(envelope), text=True,
+                                        capture_output=True, timeout=45, check=False)
+              result = call("kpool-target-v1")
+              if result.returncode != 0:
+                  raise RuntimeError("Pinned SSH did not return a verified target reply")
+              reply = json.loads(result.stdout)
+              assert (reply["target_id"], reply["correlation_id"], reply["status"]) == (target, query["query_id"], "applied")
+              assert reply["generation"] == 0
+              blocked = call("kpool-probe-invalid-command")
+              assert blocked.returncode != 0 and not blocked.stdout
+          print(json.dumps({"target_preflight": "passed", "generation": reply["generation"],
+                            "arbitrary_remote_command_rejected": True}), flush=True)
+          PY
