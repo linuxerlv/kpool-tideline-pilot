@@ -1,100 +1,90 @@
-name: Protected native delivery after a Std app detach
-
+name: A04 isolated Compose queue
+run-name: ${{ inputs.correlation != '' && format('kpool:{0}', inputs.correlation) || 'A04 native queue' }}
 on:
   workflow_dispatch:
-
+    inputs:
+      role:
+        type: choice
+        options: [C, H]
+        default: C
+      intent:
+        type: string
+      execution_sha:
+        type: string
+      correlation:
+        type: string
+      target_context:
+        type: string
+      authorization:
+        type: string
 permissions: {}
-
 jobs:
-  publish:
+  exercise:
     if: >-
       github.repository == 'linuxerlv/kpool-tideline-pilot' &&
-      github.ref == 'refs/heads/codex/tideline-hosted-offboarding' &&
+      github.ref == 'refs/heads/codex/tideline-a04-queue' &&
       github.ref_protected && github.workflow_sha == github.sha
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    environment: tideline-hosted-a04
+    runs-on: ubuntu-latest
+    timeout-minutes: 22
     permissions:
       contents: read
-      packages: write
-    outputs:
-      digest: ${{ steps.publish.outputs.digest }}
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-      - name: Test game rules
-        run: node --test tests/game.test.mjs
-      - id: publish
-        name: Publish exact game source
-        env:
-          GHCR_TOKEN: ${{ github.token }}
-        run: |
-          set -eu
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          umask 077
-          export DOCKER_CONFIG
-          DOCKER_CONFIG=$(mktemp -d "$RUNNER_TEMP/tideline-ssh-native.XXXXXXXX")
-          trap 'rm -rf -- "$DOCKER_CONFIG"' EXIT
-          printf '%s\n' '{"auths":{"ghcr.io":{}}}' > "$DOCKER_CONFIG/config.json"
-          printf '%s\n' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
-          unset GHCR_TOKEN
-          image='ghcr.io/linuxerlv/kpool-tideline-pilot'
-          metadata="$DOCKER_CONFIG/build-metadata.json"
-          docker buildx build --platform linux/amd64 --push --provenance=false --sbom=false \
-            --tag "$image:ssh-native-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
-            --label 'org.opencontainers.image.source=https://github.com/linuxerlv/kpool-tideline-pilot' \
-            --label "org.opencontainers.image.revision=$GITHUB_SHA" --metadata-file "$metadata" .
-          digest=$(jq -er '."containerimage.digest"' "$metadata")
-          grep -Eq '^sha256:[0-9a-f]{64}$' <<< "$digest"
-          printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
-          printf 'PUBLISHED_SSH_NATIVE ref=%s@%s commit=%s\n' "$image" "$digest" "$GITHUB_SHA"
-  deliver:
-    needs: publish
-    if: >-
-      github.repository == 'linuxerlv/kpool-tideline-pilot' &&
-      github.ref == 'refs/heads/codex/tideline-hosted-offboarding' &&
-      github.ref_protected && github.workflow_sha == github.sha
-    runs-on: ubuntu-24.04
-    timeout-minutes: 12
-    environment: tideline-hosted-offboarding
-    permissions:
-      contents: read
+      checks: read
+      statuses: read
       id-token: write
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Generate Runner-local disposable SSH identities
+      - name: Generate Runner-local disposable keys
+        env:
+          PILOT_ROLE: ${{ inputs.role }}
         run: |
+          set -eu
+          case "$PILOT_ROLE" in
+            C) write_role=native ;;
+            H) write_role=command ;;
+            *) exit 1 ;;
+          esac
           umask 077
-          mkdir -m 700 "$RUNNER_TEMP/tideline-keys" "$RUNNER_TEMP/tideline-public-keys"
-          for role in query native; do
-            ssh-keygen -q -t ed25519 -N '' -C "tideline-${GITHUB_RUN_ID}-${role}" -f "$RUNNER_TEMP/tideline-keys/$role"
-            mv "$RUNNER_TEMP/tideline-keys/$role.pub" "$RUNNER_TEMP/tideline-public-keys/$role.pub"
+          mkdir -m 700 "$RUNNER_TEMP/a04-keys" "$RUNNER_TEMP/a04-public-keys"
+          for role in query "$write_role"; do
+            ssh-keygen -q -t ed25519 -N '' -C "a04-${GITHUB_RUN_ID}-${role}" -f "$RUNNER_TEMP/a04-keys/$role"
+            mv -- "$RUNNER_TEMP/a04-keys/$role.pub" "$RUNNER_TEMP/a04-public-keys/$role.pub"
           done
-      - name: Publish only the public keys for exact-run enrollment
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+      - name: Publish public keys for enrollment into the exact run
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: tideline-ssh-public-keys
-          path: |
-            ${{ runner.temp }}/tideline-public-keys/query.pub
-            ${{ runner.temp }}/tideline-public-keys/native.pub
+          name: a04-public-keys-${{ inputs.role }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/a04-public-keys/*.pub
           if-no-files-found: error
           retention-days: 1
-      - name: Admit the native revision through the restricted SSH gateway
+      - name: Verify and offer the requested release through the pilot adapter
         env:
-          PILOT_HOST: ${{ vars.KPOOL_SSH_HOST }}
-          PILOT_KNOWN_HOSTS: ${{ vars.KPOOL_SSH_KNOWN_HOSTS }}
-          PILOT_QUERY_USER: ${{ vars.KPOOL_SSH_QUERY_USER }}
-          PILOT_NATIVE_USER: ${{ vars.KPOOL_SSH_NATIVE_USER }}
-          PILOT_TARGET: ${{ vars.KPOOL_SSH_TARGET_ID }}
-          PILOT_ARTIFACT: ${{ needs.publish.outputs.digest }}
-        run: python3 -B scripts/ssh_native_pilot.py
-      - name: Remove Runner-local disposable identities
+          PILOT_ROLE: ${{ inputs.role }}
+          PILOT_SCOPE: ${{ vars.KPOOL_A04_SCOPE }}
+          KPOOL_INTENT: ${{ inputs.intent }}
+          KPOOL_EXECUTION_SHA: ${{ inputs.execution_sha }}
+          KPOOL_CORRELATION: ${{ inputs.correlation }}
+          KPOOL_TARGET_CONTEXT: ${{ inputs.target_context }}
+          KPOOL_AUTHORIZATION: ${{ inputs.authorization }}
+          KPOOL_DISPATCH_PUBLIC_KEY: ${{ vars.KPOOL_DISPATCH_PUBLIC_KEY }}
+          KPOOL_CHECK_TOKEN: ${{ github.token }}
+          KPOOL_SSH_HOST: ${{ vars.KPOOL_SSH_HOST }}
+          KPOOL_SSH_PORT: ${{ vars.KPOOL_SSH_PORT }}
+          KPOOL_SSH_KNOWN_HOSTS: ${{ vars.KPOOL_SSH_KNOWN_HOSTS }}
+          KPOOL_SSH_QUERY_USER: ${{ vars.KPOOL_SSH_QUERY_USER }}
+          KPOOL_SSH_NATIVE_USER: ${{ inputs.role == 'C' && vars.KPOOL_SSH_NATIVE_USER || '' }}
+          KPOOL_SSH_COMMAND_USER: ${{ inputs.role == 'H' && vars.KPOOL_SSH_COMMAND_USER || '' }}
+        run: python3 -B scripts/ssh_a04_pilot.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: a04-${{ inputs.role }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/a04-evidence.json
+          if-no-files-found: error
+          retention-days: 3
+      - name: Remove Runner-local private keys
         if: always()
         run: |
-          rm -f -- "$RUNNER_TEMP/tideline-keys/query" "$RUNNER_TEMP/tideline-keys/native"
-          test ! -e "$RUNNER_TEMP/tideline-keys/query"
-          test ! -e "$RUNNER_TEMP/tideline-keys/native"
+          rm -f -- "$RUNNER_TEMP/a04-keys/query" "$RUNNER_TEMP/a04-keys/native" "$RUNNER_TEMP/a04-keys/command"
