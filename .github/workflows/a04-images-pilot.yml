@@ -4,7 +4,7 @@ on:
     branches:
       - codex/tideline-a04-image-a
       - codex/tideline-a04-image-h
-      - codex/tideline-a04-queue
+      - codex/tideline-a04-queue-v2
 
 permissions: {}
 
@@ -54,7 +54,7 @@ jobs:
           case "$GITHUB_REF" in
             refs/heads/codex/tideline-a04-image-a) role=A ;;
             refs/heads/codex/tideline-a04-image-h) role=H ;;
-            refs/heads/codex/tideline-a04-queue) role=C ;;
+            refs/heads/codex/tideline-a04-queue-v2) role=C ;;
             *) exit 2 ;;
           esac
           [[ "$(cat pilot-ssh-native.txt)" == "Tideline A04 release $role" ]]
