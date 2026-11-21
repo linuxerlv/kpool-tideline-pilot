@@ -12,8 +12,8 @@ if ($env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_ENVIRONMENT -cne 'github-hos
     $env:RUNNER_OS -cne 'Windows' -or $env:RUNNER_ARCH -cne 'X64' -or
     $env:GITHUB_EVENT_NAME -cne 'workflow_dispatch' -or
     $env:GITHUB_REPOSITORY -cne 'linuxerlv/kpool-tideline-pilot' -or
-    $env:GITHUB_REF -cne 'refs/heads/codex/tideline-desktop-launch-v2' -or
-    $env:GITHUB_WORKFLOW_REF -cne 'linuxerlv/kpool-tideline-pilot/.github/workflows/windows-signature-pilot.yml@refs/heads/codex/tideline-desktop-launch-v2' -or
+    $env:GITHUB_REF -cne 'refs/heads/codex/tideline-desktop-a10-chain' -or
+    $env:GITHUB_WORKFLOW_REF -cne 'linuxerlv/kpool-tideline-pilot/.github/workflows/windows-signature-pilot.yml@refs/heads/codex/tideline-desktop-a10-chain' -or
     $env:GITHUB_SHA -cnotmatch '\A[0-9a-f]{40}\z' -or $env:GITHUB_WORKFLOW_SHA -cne $env:GITHUB_SHA) {
     throw 'Desktop launch proof requires the designated hosted Windows pilot.'
 }
