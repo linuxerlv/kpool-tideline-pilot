@@ -14,7 +14,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 REPO = "linuxerlv/kpool-tideline-pilot"
 REPOSITORY = "1466251904"
-REF = "refs/heads/codex/tideline-ssh-manual-pilot"
+REF = "refs/heads/codex/tideline-ssh-manual-v2"
 WORKFLOW = f"{REPO}/.github/workflows/oidc-probe.yml@{REF}"
 TARGET = "tgt_tideline_ssh_manual_20261121"
 SOURCE = "8bf75f94e2fe206ad21509f0cbc6dfc50e90a387"
@@ -91,7 +91,8 @@ def target(directory, token, role, command, *, denied=False):
     envelope = {"schema_version": 1, "command": command, "oidc_token": token}
     process = subprocess.run(
         (
-            "/usr/bin/ssh", "-F", "/dev/null", "-T", "-i", str(directory / role),
+            "/usr/bin/ssh", "-F", "/dev/null", "-T", "-i",
+            str(Path(os.environ["RUNNER_TEMP"]) / "tideline-keys" / role),
             "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none",
             "-o", "IdentityFile=none", "-o", "StrictHostKeyChecking=yes", "-o",
             "GlobalKnownHostsFile=/dev/null", "-o", f"UserKnownHostsFile={directory / 'hosts'}",
@@ -113,9 +114,20 @@ def target(directory, token, role, command, *, denied=False):
     return result
 
 
+def wait_for_enrollment(directory):
+    preflight = {**BASE, "kind": "preflight", "query_id": "signed-preflight"}
+    deadline = time.monotonic() + 600
+    while time.monotonic() < deadline:
+        token = oidc()
+        try:
+            return token, target(directory, token, "query", preflight)
+        except (RuntimeError, subprocess.TimeoutExpired):
+            time.sleep(5)
+    raise TimeoutError("The independently enrolled read-only identity did not respond")
+
+
 def exercise(directory, command):
-    token = oidc()
-    prior = target(directory, token, "query", {**BASE, "kind": "preflight", "query_id": "signed-preflight"})
+    token, prior = wait_for_enrollment(directory)
     assert (prior["status"], prior["policy_revision"], prior["generation"]) == ("applied", POLICY, 0)
     target(directory, token, "query", command, denied=True)
     admitted = target(directory, token, "command", command)
@@ -155,9 +167,6 @@ def main():
         directory = Path(root)
         command = approved_command(directory)
         (directory / "hosts").write_text(os.environ["PILOT_KNOWN_HOSTS"].strip() + "\n")
-        for role in ("query", "command"):
-            private = os.environ.pop(f"PILOT_{role.upper()}_KEY").strip().replace("\r\n", "\n")
-            (directory / role).write_text(private + "\n")
         exercise(directory, command)
 
 
