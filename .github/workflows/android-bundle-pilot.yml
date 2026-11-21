@@ -1,0 +1,52 @@
+name: Android bundle pilot
+
+on:
+  workflow_dispatch:
+    inputs:
+      first_build:
+        description: First reserved Android versionCode
+        required: true
+        type: string
+      second_build:
+        description: Next reserved Android versionCode
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  verify:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.repository == 'linuxerlv/kpool-tideline-pilot' &&
+      github.ref == 'refs/heads/main' &&
+      github.event.repository.default_branch == 'main' &&
+      github.workflow_ref == 'linuxerlv/kpool-tideline-pilot/.github/workflows/android-bundle-pilot.yml@refs/heads/main' &&
+      github.workflow_sha == github.sha
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Validate workflow scope
+        run: |
+          # GitHub expression comparisons ignore case. Check the scope exactly before checkout.
+          [[ "$GITHUB_EVENT_NAME" == 'workflow_dispatch' ]]
+          [[ "$GITHUB_REPOSITORY" == 'linuxerlv/kpool-tideline-pilot' ]]
+          [[ "$GITHUB_REF" == 'refs/heads/main' ]]
+          [[ "$(jq -er '.repository.default_branch' "$GITHUB_EVENT_PATH")" == 'main' ]]
+          [[ "$GITHUB_WORKFLOW_REF" == 'linuxerlv/kpool-tideline-pilot/.github/workflows/android-bundle-pilot.yml@refs/heads/main' ]]
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
+          [[ "$RUNNER_ENVIRONMENT" == 'github-hosted' && "$RUNNER_OS" == 'Linux' && "$RUNNER_ARCH" == 'X64' ]]
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify both signed Android bundles and the offline upgrade
+        env:
+          FIRST_BUILD: ${{ inputs.first_build }}
+          SECOND_BUILD: ${{ inputs.second_build }}
+        run: bash scripts/verify_android_pilot.sh "$FIRST_BUILD" "$SECOND_BUILD"
