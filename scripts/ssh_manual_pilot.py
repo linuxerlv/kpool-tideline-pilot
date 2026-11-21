@@ -14,7 +14,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 REPO = "linuxerlv/kpool-tideline-pilot"
 REPOSITORY = "1466251904"
-REF = "refs/heads/codex/tideline-ssh-manual-v2"
+REF = "refs/heads/codex/tideline-ssh-manual-v3"
 WORKFLOW = f"{REPO}/.github/workflows/oidc-probe.yml@{REF}"
 TARGET = "tgt_tideline_ssh_manual_20261121"
 SOURCE = "8bf75f94e2fe206ad21509f0cbc6dfc50e90a387"
@@ -133,14 +133,20 @@ def exercise(directory, command):
     admitted = target(directory, token, "command", command)
     assert admitted["status"] in {"accepted", "applied"} and admitted["generation"] == 1
     query = {**BASE, "kind": "status", "query_id": "signed-status", "lookup_request_id": command["request_id"]}
-    deadline = time.monotonic() + 100
+    deadline = time.monotonic() + 300
+    read_errors = 0
     while time.monotonic() < deadline:
-        measured = target(directory, token, "query", query)
+        try:
+            measured = target(directory, oidc(), "query", query)
+        except (RuntimeError, subprocess.TimeoutExpired):
+            read_errors += 1
+            time.sleep(5)
+            continue
         if measured["status"] == "applied":
             break
         if measured["status"] in {"not_applied", "rejected"}:
             raise RuntimeError("Signed publication ended with " + measured.get("reason_code", "unknown state"))
-        time.sleep(2)
+        time.sleep(5)
     else:
         raise TimeoutError("No terminal result for signed publication")
     assert (measured["generation"], measured["verification"], measured["observed_artifact"]) == (1, "passed", ARTIFACT)
@@ -149,12 +155,13 @@ def exercise(directory, command):
     assert (record["action_id"], record["origin_run_id"], record["origin_run_attempt"], record["source_sha"]) == (
         command["request_id"], run_id, attempt, SOURCE,
     )
-    replay = target(directory, token, "command", command)
+    replay = target(directory, oidc(), "command", command)
     assert replay["status"] == "applied" and replay["generation"] == 1 and replay["observed_artifact"] == ARTIFACT
-    assert target(directory, token, "query", query) == measured
+    assert target(directory, oidc(), "query", query) == measured
     print("KPOOL_SIGNED_SSH_PROOF=" + json.dumps({
         "execution_sha": os.environ["GITHUB_SHA"], "signature_verified": True, "tamper_denied": True,
         "query_write_denied": True, "command_replay": True, "admitted": admitted, "terminal": measured,
+        "status_transport_retries": read_errors,
     }, sort_keys=True), flush=True)
 
 

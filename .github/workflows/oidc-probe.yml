@@ -10,11 +10,11 @@ jobs:
   deliver:
     if: >-
       github.repository == 'linuxerlv/kpool-tideline-pilot' &&
-      github.ref == 'refs/heads/codex/tideline-ssh-manual-v2' &&
+      github.ref == 'refs/heads/codex/tideline-ssh-manual-v3' &&
       github.ref_protected && github.workflow_sha == github.sha
     runs-on: ubuntu-24.04
     timeout-minutes: 16
-    environment: tideline-restricted-ssh-manual-v2
+    environment: tideline-restricted-ssh-manual-v3
     permissions:
       contents: read
       id-token: write
