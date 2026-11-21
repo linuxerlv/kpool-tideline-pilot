@@ -1,4 +1,4 @@
-"""Probe a single signed, ordinary-write deployment against a dedicated target."""
+"""Witness a single approved release after it routes but before verification."""
 
 import base64
 import json
@@ -14,7 +14,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 REPO = "linuxerlv/kpool-tideline-pilot"
 REPOSITORY = "1466251904"
-REF = "refs/heads/codex/tideline-ssh-manual-v3"
+REF = "refs/heads/codex/tideline-after-switch-loss"
 WORKFLOW = f"{REPO}/.github/workflows/oidc-probe.yml@{REF}"
 TARGET = "tgt_tideline_ssh_manual_20261121"
 SOURCE = "8bf75f94e2fe206ad21509f0cbc6dfc50e90a387"
@@ -133,36 +133,31 @@ def exercise(directory, command):
     admitted = target(directory, token, "command", command)
     assert admitted["status"] in {"accepted", "applied"} and admitted["generation"] == 1
     query = {**BASE, "kind": "status", "query_id": "signed-status", "lookup_request_id": command["request_id"]}
-    deadline = time.monotonic() + 300
-    read_errors = 0
+    deadline = time.monotonic() + 260
     while time.monotonic() < deadline:
         try:
             measured = target(directory, oidc(), "query", query)
         except (RuntimeError, subprocess.TimeoutExpired):
-            read_errors += 1
             time.sleep(5)
             continue
-        if measured["status"] == "applied":
+        if measured["status"] == "running" and measured.get("observed_artifact") == ARTIFACT:
             break
-        if measured["status"] in {"not_applied", "rejected"}:
+        if measured["status"] in {"applied", "not_applied", "rejected"}:
             raise RuntimeError("Signed publication ended with " + measured.get("reason_code", "unknown state"))
         time.sleep(5)
     else:
-        raise TimeoutError("No terminal result for signed publication")
-    assert (measured["generation"], measured["verification"], measured["observed_artifact"]) == (1, "passed", ARTIFACT)
-    record, = measured["ledger_records"]
-    run_id, attempt = os.environ["GITHUB_RUN_ID"], int(os.environ["GITHUB_RUN_ATTEMPT"])
-    assert (record["action_id"], record["origin_run_id"], record["origin_run_attempt"], record["source_sha"]) == (
-        command["request_id"], run_id, attempt, SOURCE,
-    )
-    replay = target(directory, oidc(), "command", command)
-    assert replay["status"] == "applied" and replay["generation"] == 1 and replay["observed_artifact"] == ARTIFACT
-    assert target(directory, oidc(), "query", query) == measured
-    print("KPOOL_SIGNED_SSH_PROOF=" + json.dumps({
-        "execution_sha": os.environ["GITHUB_SHA"], "signature_verified": True, "tamper_denied": True,
-        "query_write_denied": True, "command_replay": True, "admitted": admitted, "terminal": measured,
-        "status_transport_retries": read_errors,
-    }, sort_keys=True), flush=True)
+        raise TimeoutError("Live route was not witnessed during the observation phase")
+    assert (measured["generation"], measured["config_revision"]) == (1, REVISION)
+    assert "verification" not in measured and not measured.get("ledger_records")
+    assert any(item["source"] == "target" and item["artifact"] == ARTIFACT for item in measured["evidence"])
+    receipt = Path(os.environ["RUNNER_TEMP"]) / "tideline-after-switch-checkpoint.json"
+    receipt.write_text(json.dumps({
+        "execution_sha": os.environ["GITHUB_SHA"], "run_id": os.environ["GITHUB_RUN_ID"],
+        "run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]), "request_id": command["request_id"],
+        "signature_verified": True, "tamper_denied": True, "query_write_denied": True,
+        "admitted": admitted, "after_switch": measured,
+    }, sort_keys=True), encoding="utf-8")
+    print("KPOOL_AFTER_SWITCH_CHECKPOINT_READY", flush=True)
 
 
 def main():
