@@ -1,0 +1,122 @@
+name: A04 game images
+on:
+  push:
+    branches:
+      - codex/tideline-a04-image-a
+      - codex/tideline-a04-image-h
+      - codex/tideline-a04-queue
+
+permissions: {}
+
+jobs:
+  game:
+    name: a04-required-test
+    if: github.repository_id == '1466251904' && github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+      - name: Test the exact game source
+        run: node --test tests/game.test.mjs
+
+  publish:
+    name: a04-image
+    needs: game
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.image.outputs.digest }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Publish immutable game image
+        id: image
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          [[ "$GITHUB_REPOSITORY" == 'linuxerlv/kpool-tideline-pilot' ]]
+          [[ "$GITHUB_REPOSITORY_ID" == '1466251904' && "$GITHUB_EVENT_NAME" == 'push' ]]
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ && "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ ]]
+          case "$GITHUB_REF" in
+            refs/heads/codex/tideline-a04-image-a) role=A ;;
+            refs/heads/codex/tideline-a04-image-h) role=H ;;
+            refs/heads/codex/tideline-a04-queue) role=C ;;
+            *) exit 2 ;;
+          esac
+          [[ "$(cat pilot-ssh-native.txt)" == "Tideline A04 release $role" ]]
+
+          image='ghcr.io/linuxerlv/kpool-tideline-pilot'
+          tag="a04-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          umask 077
+          export DOCKER_CONFIG
+          DOCKER_CONFIG=$(mktemp -d "$RUNNER_TEMP/a04-images.XXXXXXXX")
+          trap 'rm -rf -- "$DOCKER_CONFIG"' EXIT
+          printf '%s\n' '{"auths":{"ghcr.io":{}}}' > "$DOCKER_CONFIG/config.json"
+          printf '%s\n' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          unset GHCR_TOKEN
+
+          metadata="$DOCKER_CONFIG/build.json"
+          docker buildx build --platform linux/amd64 --push --tag "$image:$tag" \
+            --label 'org.opencontainers.image.source=https://github.com/linuxerlv/kpool-tideline-pilot' \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" --metadata-file "$metadata" .
+          digest=$(jq -er '."containerimage.digest"' "$metadata")
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+          printf 'A04_GAME_IMAGE role=%s sha=%s digest=%s\n' "$role" "$GITHUB_SHA" "$digest"
+
+  retained:
+    name: a04-retained-health
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify exact published content and health
+        env:
+          PUBLISHED_DIGEST: ${{ needs.publish.outputs.digest }}
+        run: |
+          [[ "$PUBLISHED_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          image="ghcr.io/linuxerlv/kpool-tideline-pilot@$PUBLISHED_DIGEST"
+          docker pull "$image"
+          [[ "$(docker inspect --format='{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image")" == "$GITHUB_SHA" ]]
+          container=$(docker run -d -p 127.0.0.1::80 "$image")
+          trap 'docker rm -f -- "$container" >/dev/null' EXIT
+          listen="$(docker port "$container" 80/tcp)"
+          [[ "$listen" =~ ^127\.0\.0\.1:[0-9]+$ ]]
+          curl --fail --silent --show-error --retry 5 --retry-connrefused --max-time 10 "http://$listen/healthz"
+          curl --fail --silent --show-error --max-time 10 "http://$listen/pilot-ssh-native.txt" |
+            cmp - pilot-ssh-native.txt
+
+  optional:
+    name: a04-waivable-diagnostic
+    needs: game
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Validate the game asset marker
+        run: grep -Eq '^Tideline A04 release [AHC]$' pilot-ssh-native.txt
