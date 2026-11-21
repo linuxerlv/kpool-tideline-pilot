@@ -1,10 +1,11 @@
-"""Probe a single signed, ordinary-write deployment against a dedicated target."""
+"""Verify recovery from a single signed candidate on a dedicated target."""
 
 import base64
 import json
 import os
 import re
 import subprocess
+import sys
 import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -14,13 +15,15 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 REPO = "linuxerlv/kpool-tideline-pilot"
 REPOSITORY = "1466251904"
-REF = "refs/heads/codex/tideline-ssh-manual-v3"
+REF = "refs/heads/codex/tideline-hosted-auto-recovery"
 WORKFLOW = f"{REPO}/.github/workflows/oidc-probe.yml@{REF}"
 TARGET = "tgt_tideline_ssh_manual_20261121"
-SOURCE = "8bf75f94e2fe206ad21509f0cbc6dfc50e90a387"
-ARTIFACT = "sha256:cee560b387be230c6b5cecafcf5e5e885ef6046e3006674fe441ba00bc064bac"
+SOURCE = "0644d4686776f68c41f27e4d825b0cb056e99cf2"
+ARTIFACT = "sha256:5ecf3c0785dfcae69795040fd3d34374277100164507a981009e61e80c7228cf"
+PREVIOUS = "sha256:cee560b387be230c6b5cecafcf5e5e885ef6046e3006674fe441ba00bc064bac"
+SEED = "op_tideline_recovery_seed"
 POLICY = "p1"
-REVISION = "cfg_a"
+REVISION = "cfg_b"
 CORRELATION = "7a24f48d35a2da4be11f3a66c2ea09d4"
 BASE = {"schema_version": 1, "target_id": TARGET}
 
@@ -74,12 +77,12 @@ def approved_command(directory):
     assert intent["arguments"]["kind"] == "deploy" and "target_command" not in intent
     assert re.fullmatch(r"op_[0-9a-f]{32}", intent["request_id"])
     assert set(context) == {"config_revision", "expected_generation", "expires_at"}
-    assert (context["config_revision"], context["expected_generation"]) == (REVISION, 0)
+    assert (context["config_revision"], context["expected_generation"]) == (REVISION, 1)
     assert type(context["expires_at"]) is int and time.time() < context["expires_at"]
     return {
         **BASE, "kind": "submit", "repository_id": REPOSITORY, "request_id": intent["request_id"],
         "source_sha": SOURCE, "artifact": ARTIFACT, "policy_revision": POLICY,
-        "config_revision": REVISION, "expected_generation": 0,
+        "config_revision": REVISION, "expected_generation": 1,
     }
 
 
@@ -114,54 +117,75 @@ def target(directory, token, role, command, *, denied=False):
     return result
 
 
-def wait_for_enrollment(directory):
-    preflight = {**BASE, "kind": "preflight", "query_id": "signed-preflight"}
-    deadline = time.monotonic() + 600
+def status(directory, operation):
+    return target(directory, oidc(), "query", {**BASE, "kind": "status", "query_id": "signed-status",
+                                                "lookup_request_id": operation})
+
+
+def wait_for_status(directory, operation, predicate, allowed, seconds):
+    deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
-        token = oidc()
         try:
-            return token, target(directory, token, "query", preflight)
+            result = status(directory, operation)
         except (RuntimeError, subprocess.TimeoutExpired):
             time.sleep(5)
-    raise TimeoutError("The independently enrolled read-only identity did not respond")
+            continue
+        if predicate(result):
+            return result
+        if result["status"] not in allowed:
+            raise ValueError("The trial entered an unexpected state: " + result.get("reason_code", result["status"]))
+        time.sleep(3)
+    raise TimeoutError("The expected target phase did not arrive")
 
 
 def exercise(directory, command):
-    token, prior = wait_for_enrollment(directory)
-    assert (prior["status"], prior["policy_revision"], prior["generation"]) == ("applied", POLICY, 0)
+    prior = wait_for_status(directory, SEED, lambda result: result["status"] == "applied",
+                            {"accepted", "running", "unknown", "not_applied"}, 420)
+    assert (prior["generation"], prior["verification"], prior["observed_artifact"]) == (1, "passed", PREVIOUS)
+    token = oidc()
     target(directory, token, "query", command, denied=True)
     admitted = target(directory, token, "command", command)
-    assert admitted["status"] in {"accepted", "applied"} and admitted["generation"] == 1
-    query = {**BASE, "kind": "status", "query_id": "signed-status", "lookup_request_id": command["request_id"]}
-    deadline = time.monotonic() + 300
-    read_errors = 0
-    while time.monotonic() < deadline:
-        try:
-            measured = target(directory, oidc(), "query", query)
-        except (RuntimeError, subprocess.TimeoutExpired):
-            read_errors += 1
-            time.sleep(5)
-            continue
-        if measured["status"] == "applied":
-            break
-        if measured["status"] in {"not_applied", "rejected"}:
-            raise RuntimeError("Signed publication ended with " + measured.get("reason_code", "unknown state"))
-        time.sleep(5)
-    else:
-        raise TimeoutError("No terminal result for signed publication")
-    assert (measured["generation"], measured["verification"], measured["observed_artifact"]) == (1, "passed", ARTIFACT)
-    record, = measured["ledger_records"]
+    assert admitted["status"] == "accepted" and admitted["generation"] == 2
+    measured = wait_for_status(directory, command["request_id"],
+                               lambda result: result["status"] == "running" and result.get("observed_artifact") == ARTIFACT,
+                               {"accepted", "running", "unknown"}, 265)
+    assert measured["generation"] == 2 and measured["config_revision"] == REVISION and not measured.get("verification")
+    return {"execution_sha": os.environ["GITHUB_SHA"], "run_id": os.environ["GITHUB_RUN_ID"],
+            "run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]), "command": command,
+            "prior": prior, "admitted": admitted, "before_fault": measured}
+
+
+def verify_recovery(directory, checkpoint):
     run_id, attempt = os.environ["GITHUB_RUN_ID"], int(os.environ["GITHUB_RUN_ATTEMPT"])
-    assert (record["action_id"], record["origin_run_id"], record["origin_run_attempt"], record["source_sha"]) == (
-        command["request_id"], run_id, attempt, SOURCE,
+    assert (checkpoint["run_id"], checkpoint["run_attempt"], checkpoint["execution_sha"]) == (
+        run_id, attempt, os.environ["GITHUB_SHA"],
+    )
+    command = checkpoint["command"]
+    parent = wait_for_status(directory, command["request_id"],
+                             lambda result: result.get("reason_code") == "AUTO_RESTORED",
+                             {"accepted", "running", "unknown"}, 295)
+    assert (parent["status"], parent["generation"], parent["verification"]) == ("not_applied", 2, "failed")
+    first, second = parent["ledger_records"]
+    assert (first["action_id"], first["kind"], first["outcome"], first["observed_artifact"]) == (
+        command["request_id"], "deploy", "failed", ARTIFACT,
+    )
+    assert (second["parent_action_id"], second["kind"], second["outcome"], second["observed_artifact"]) == (
+        command["request_id"], "restore", "applied", PREVIOUS,
+    )
+    for entry in (first, second):
+        assert (entry["generation"], entry["origin_run_id"], entry["origin_run_attempt"], entry["source_sha"]) == (
+            2, run_id, attempt, SOURCE,
+        )
+    child = status(directory, second["action_id"])
+    assert (child["status"], child["verification"], child["generation"], child["observed_artifact"]) == (
+        "applied", "passed", 2, PREVIOUS,
     )
     replay = target(directory, oidc(), "command", command)
-    assert replay["status"] == "applied" and replay["generation"] == 1 and replay["observed_artifact"] == ARTIFACT
-    assert target(directory, oidc(), "query", query) == measured
-    print("KPOOL_SIGNED_SSH_PROOF=" + json.dumps({
-        "execution_sha": os.environ["GITHUB_SHA"], "signature_verified": True, "tamper_denied": True,
-        "query_write_denied": True, "command_replay": True, "admitted": admitted, "terminal": measured,
-        "status_transport_retries": read_errors,
+    assert (replay["status"], replay["generation"], replay["reason_code"]) == ("not_applied", 2, "AUTO_RESTORED")
+    assert status(directory, command["request_id"]) == parent
+    print("KPOOL_HOSTED_RECOVERY_PROOF=" + json.dumps({
+        "execution_sha": checkpoint["execution_sha"], "command": command, "run_id": run_id,
+        "run_attempt": attempt, "parent": parent, "child": child, "replay": replay,
     }, sort_keys=True), flush=True)
 
 
@@ -170,11 +194,17 @@ def main():
     assert os.environ["GITHUB_REF"] == REF and os.environ["GITHUB_REF_PROTECTED"] == "true"
     assert os.environ["GITHUB_WORKFLOW_REF"] == WORKFLOW and os.environ["GITHUB_EVENT_NAME"] == "workflow_dispatch"
     os.umask(0o077)
+    path = Path(os.environ["RUNNER_TEMP"]) / "tideline-candidate-route.json"
     with TemporaryDirectory(dir=os.environ["RUNNER_TEMP"]) as root:
         directory = Path(root)
-        command = approved_command(directory)
         (directory / "hosts").write_text(os.environ["PILOT_KNOWN_HOSTS"].strip() + "\n")
-        exercise(directory, command)
+        stage, = sys.argv[1:]
+        if stage == "candidate":
+            path.write_text(json.dumps(exercise(directory, approved_command(directory)), sort_keys=True), encoding="utf-8")
+        elif stage == "recovered":
+            verify_recovery(directory, json.loads(path.read_text(encoding="utf-8")))
+        else:
+            raise ValueError("Expected candidate or recovered stage")
 
 
 if __name__ == "__main__":

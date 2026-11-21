@@ -1,4 +1,4 @@
-name: Signed ordinary SSH deployment pilot
+name: Hosted automatic recovery pilot
 run-name: kpool:7a24f48d35a2da4be11f3a66c2ea09d4
 
 on:
@@ -10,11 +10,11 @@ jobs:
   deliver:
     if: >-
       github.repository == 'linuxerlv/kpool-tideline-pilot' &&
-      github.ref == 'refs/heads/codex/tideline-ssh-manual-v3' &&
+      github.ref == 'refs/heads/codex/tideline-hosted-auto-recovery' &&
       github.ref_protected && github.workflow_sha == github.sha
     runs-on: ubuntu-24.04
     timeout-minutes: 16
-    environment: tideline-restricted-ssh-manual-v3
+    environment: tideline-hosted-auto-recovery
     permissions:
       contents: read
       id-token: write
@@ -25,12 +25,12 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          ref: 8bf75f94e2fe206ad21509f0cbc6dfc50e90a387
+          ref: 0644d4686776f68c41f27e4d825b0cb056e99cf2
           path: fixture-source
           persist-credentials: false
       - name: Test the exact archived game source
         run: |
-          test "$(git -C fixture-source rev-parse HEAD)" = 8bf75f94e2fe206ad21509f0cbc6dfc50e90a387
+          test "$(git -C fixture-source rev-parse HEAD)" = 0644d4686776f68c41f27e4d825b0cb056e99cf2
           node --test fixture-source/tests/game.test.mjs
       - name: Generate disposable SSH identities
         run: |
@@ -61,7 +61,21 @@ jobs:
           KPOOL_TARGET_CONTEXT: ${{ vars.KPOOL_TARGET_CONTEXT }}
           KPOOL_AUTHORIZATION: ${{ vars.KPOOL_AUTHORIZATION }}
           KPOOL_DISPATCH_PUBLIC_KEY: ${{ vars.KPOOL_DISPATCH_PUBLIC_KEY }}
-        run: python3 -B scripts/ssh_manual_pilot.py
+        run: python3 -B scripts/ssh_manual_pilot.py candidate
+      - name: Publish the pre-fault route witness
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: tideline-candidate-route
+          path: ${{ runner.temp }}/tideline-candidate-route.json
+          if-no-files-found: error
+          retention-days: 3
+      - name: Verify same-generation target recovery
+        env:
+          PILOT_HOST: ${{ vars.KPOOL_SSH_HOST }}
+          PILOT_KNOWN_HOSTS: ${{ vars.KPOOL_SSH_KNOWN_HOSTS }}
+          PILOT_QUERY_USER: ${{ vars.KPOOL_SSH_QUERY_USER }}
+          PILOT_COMMAND_USER: ${{ vars.KPOOL_SSH_COMMAND_USER }}
+        run: python3 -B scripts/ssh_manual_pilot.py recovered
       - name: Remove runner-only disposable keys
         if: always()
         run: |
