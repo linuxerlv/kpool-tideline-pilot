@@ -1,0 +1,123 @@
+name: GHCR pilot
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  publish:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.repository == 'linuxerlv/kpool-tideline-pilot' &&
+      github.ref == 'refs/heads/main' &&
+      github.event.repository.default_branch == 'main' &&
+      github.workflow_ref == 'linuxerlv/kpool-tideline-pilot/.github/workflows/ghcr-pilot.yml@refs/heads/main' &&
+      github.workflow_sha == github.sha
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+      revision: ${{ steps.push.outputs.revision }}
+    steps:
+      - name: Validate workflow scope
+        run: |
+          # GitHub expression comparisons ignore case. Check the scope exactly before checkout.
+          [[ "$GITHUB_EVENT_NAME" == 'workflow_dispatch' ]]
+          [[ "$GITHUB_REPOSITORY" == 'linuxerlv/kpool-tideline-pilot' ]]
+          [[ "$GITHUB_REF" == 'refs/heads/main' ]]
+          [[ "$(jq -er '.repository.default_branch' "$GITHUB_EVENT_PATH")" == 'main' ]]
+          [[ "$GITHUB_WORKFLOW_REF" == 'linuxerlv/kpool-tideline-pilot/.github/workflows/ghcr-pilot.yml@refs/heads/main' ]]
+          [[ "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+      - name: Test game rules
+        run: node --test tests/game.test.mjs
+      - name: Publish the game image
+        id: push
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ && "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ ]]
+          image='ghcr.io/linuxerlv/kpool-tideline-pilot'
+          tag="pilot-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+          umask 077
+          export DOCKER_CONFIG
+          DOCKER_CONFIG=$(mktemp -d "$RUNNER_TEMP/tideline-publish.XXXXXXXX")
+          trap 'rm -rf -- "$DOCKER_CONFIG"' EXIT
+          # Keep credentials within the temporary config, even if a credential helper is installed.
+          printf '%s\n' '{"auths":{"ghcr.io":{}}}' > "$DOCKER_CONFIG/config.json"
+          printf '%s\n' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          unset GHCR_TOKEN
+
+          metadata="$DOCKER_CONFIG/build-metadata.json"
+          docker buildx build --platform linux/amd64 --push --tag "$image:$tag" \
+            --label 'org.opencontainers.image.source=https://github.com/linuxerlv/kpool-tideline-pilot' \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" --metadata-file "$metadata" .
+          digest=$(jq -er '."containerimage.digest"' "$metadata")
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          printf 'digest=%s\nrevision=%s\n' "$digest" "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          printf 'KPOOL_GHCR_PUBLISHED ref=%s@%s revision=%s tag=%s\n' "$image" "$digest" "$GITHUB_SHA" "$tag"
+
+  verify:
+    needs: publish
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.repository == 'linuxerlv/kpool-tideline-pilot' &&
+      github.ref == 'refs/heads/main' &&
+      github.event.repository.default_branch == 'main' &&
+      github.workflow_ref == 'linuxerlv/kpool-tideline-pilot/.github/workflows/ghcr-pilot.yml@refs/heads/main' &&
+      github.workflow_sha == github.sha
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Validate workflow scope
+        run: |
+          [[ "$GITHUB_EVENT_NAME" == 'workflow_dispatch' ]]
+          [[ "$GITHUB_REPOSITORY" == 'linuxerlv/kpool-tideline-pilot' ]]
+          [[ "$GITHUB_REF" == 'refs/heads/main' ]]
+          [[ "$(jq -er '.repository.default_branch' "$GITHUB_EVENT_PATH")" == 'main' ]]
+          [[ "$GITHUB_WORKFLOW_REF" == 'linuxerlv/kpool-tideline-pilot/.github/workflows/ghcr-pilot.yml@refs/heads/main' ]]
+          [[ "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Pull by digest and verify the image
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+          DIGEST: ${{ needs.publish.outputs.digest }}
+          REVISION: ${{ needs.publish.outputs.revision }}
+        run: |
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$REVISION" =~ ^[0-9a-f]{40}$ && "$REVISION" == "$GITHUB_SHA" ]]
+          [[ "$(git rev-parse HEAD)" == "$REVISION" ]]
+          IMAGE_REF="ghcr.io/linuxerlv/kpool-tideline-pilot@$DIGEST"
+
+          umask 077
+          export DOCKER_CONFIG
+          DOCKER_CONFIG=$(mktemp -d "$RUNNER_TEMP/tideline-verify.XXXXXXXX")
+          trap 'rm -rf -- "$DOCKER_CONFIG"' EXIT
+          printf '%s\n' '{"auths":{"ghcr.io":{}}}' > "$DOCKER_CONFIG/config.json"
+          printf '%s\n' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          unset GHCR_TOKEN
+
+          bash scripts/verify_registry_image.sh "$IMAGE_REF" "$REVISION"
