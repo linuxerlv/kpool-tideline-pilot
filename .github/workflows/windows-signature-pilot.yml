@@ -1,0 +1,204 @@
+name: Windows signature pilot
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  verify:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.repository == 'linuxerlv/kpool-tideline-pilot' &&
+      github.ref == 'refs/heads/main' &&
+      github.event.repository.default_branch == 'main' &&
+      github.workflow_ref == 'linuxerlv/kpool-tideline-pilot/.github/workflows/windows-signature-pilot.yml@refs/heads/main' &&
+      github.workflow_sha == github.sha
+    runs-on: windows-2025
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Validate workflow scope
+        shell: pwsh
+        run: |
+          $event = Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw | ConvertFrom-Json
+          # GitHub expression comparisons ignore case. Check the scope exactly before checkout.
+          if ($env:GITHUB_EVENT_NAME -cne 'workflow_dispatch' -or
+              $env:GITHUB_REPOSITORY -cne 'linuxerlv/kpool-tideline-pilot' -or
+              $env:GITHUB_REF -cne 'refs/heads/main' -or $event.repository.default_branch -cne 'main' -or
+              $env:GITHUB_WORKFLOW_REF -cne 'linuxerlv/kpool-tideline-pilot/.github/workflows/windows-signature-pilot.yml@refs/heads/main' -or
+              $env:GITHUB_SHA -cnotmatch '\A[0-9a-f]{40}\z' -or $env:GITHUB_WORKFLOW_SHA -cne $env:GITHUB_SHA -or
+              $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or $env:RUNNER_ARCH -cne 'X64') {
+            throw 'The Windows signature pilot requires a manual run from its canonical main branch on a GitHub-hosted Windows x64 runner.'
+          }
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Sign and verify the Tideline download
+        shell: pwsh
+        run: |
+          function Get-BundleProof([string] $Path) {
+            # Tideline is a GUI executable. Explicitly wait and read its verification output.
+            $start = [Diagnostics.ProcessStartInfo]::new($Path)
+            $start.UseShellExecute = $false
+            $start.RedirectStandardOutput = $true
+            $start.ArgumentList.Add('--verify')
+            $process = [Diagnostics.Process]::Start($start)
+            try {
+              $stdout = $process.StandardOutput.ReadToEndAsync()
+              if (-not $process.WaitForExit(15000)) {
+                $process.Kill()
+                $process.WaitForExit()
+                throw 'Tideline bundle verification timed out.'
+              }
+              if ($process.ExitCode -ne 0) { throw 'Tideline bundle verification failed.' }
+              $bundle = $stdout.GetAwaiter().GetResult() | ConvertFrom-Json
+              if ($bundle.source_sha -cne $env:GITHUB_SHA -or
+                  $bundle.bundle_sha256 -cnotmatch '\A[0-9a-f]{64}\z' -or
+                  $bundle.version -cnotmatch '\A[0-9]+(?:\.[0-9]+){3}\z') {
+                throw 'Tideline returned invalid bundle proof.'
+              }
+              return $bundle
+            } finally {
+              $process.Dispose()
+            }
+          }
+
+          function Assert-FixtureSignature([string] $Path, [string] $CertificateSha256) {
+            $signature = Get-AuthenticodeSignature -LiteralPath $Path
+            if ($signature.Status -ne 'Valid' -or $signature.SignatureType -ne 'Authenticode' -or
+                $signature.SignerCertificate.GetCertHashString([Security.Cryptography.HashAlgorithmName]::SHA256) -ne $CertificateSha256) {
+              throw "Windows did not validate the fixture Authenticode signature ($($signature.Status))."
+            }
+          }
+
+          $revision = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $revision -cne $env:GITHUB_SHA) { throw 'Checkout SHA differs from the workflow SHA.' }
+
+          $fixtureId = [guid]::NewGuid().ToString('N')
+          $scratch = Join-Path $env:RUNNER_TEMP "tideline-signature-$fixtureId"
+          $executable = Join-Path $scratch 'Tideline.exe'
+          $download = Join-Path $scratch 'Tideline.download.exe'
+          New-Item -ItemType Directory -Path $scratch | Out-Null
+          $signer = $publicSigner = $rootStore = $null
+          $trustAttempted = $false
+          try {
+            python scripts/build_windows.py --out $executable
+            if ($LASTEXITCODE -ne 0) { throw 'Tideline Windows build failed.' }
+            $originalBundle = Get-BundleProof $executable
+            $unsignedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $executable).Hash
+
+            # The only trust addition is the public half of this job's short-lived signing fixture.
+            $signer = New-SelfSignedCertificate -Type CodeSigningCert -Subject "CN=Kpool Tideline fixture $fixtureId" `
+              -CertStoreLocation 'Cert:\CurrentUser\My' -KeyExportPolicy NonExportable `
+              -KeyAlgorithm RSA -KeyLength 2048 -HashAlgorithm SHA256 `
+              -NotAfter (Get-Date).AddMinutes(30)
+            $publicSigner = [Security.Cryptography.X509Certificates.X509Certificate2]::new($signer.RawData)
+            $certificateHash = $publicSigner.GetCertHashString([Security.Cryptography.HashAlgorithmName]::SHA256)
+            # On the disposable hosted VM, the machine store avoids the CurrentUser root confirmation dialog.
+            $rootStore = [Security.Cryptography.X509Certificates.X509Store]::new('Root', 'LocalMachine')
+            $rootStore.Open('ReadWrite')
+            $trustAttempted = $true
+            $rootStore.Add($publicSigner)
+
+            Set-AuthenticodeSignature -LiteralPath $executable -Certificate $signer -HashAlgorithm SHA256 -IncludeChain Signer | Out-Null
+            Assert-FixtureSignature $executable $certificateHash
+            $signedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $executable).Hash
+            if ($signedHash -ceq $unsignedHash) { throw 'The signed executable has the unsigned SHA-256 digest.' }
+
+            $httpStatus = @'
+          from contextlib import closing
+          from http.client import HTTPConnection
+          from http.server import BaseHTTPRequestHandler, HTTPServer
+          from pathlib import Path
+          import sys
+          from threading import Thread
+
+          executable, download = map(Path, sys.argv[1:])
+          signed_bytes = executable.read_bytes()
+
+          class DownloadHandler(BaseHTTPRequestHandler):
+              def do_GET(self):
+                  if self.path != '/Tideline.exe':
+                      self.send_error(404)
+                      return
+                  self.send_response(200)
+                  self.send_header('Content-Type', 'application/octet-stream')
+                  self.send_header('Content-Length', str(len(signed_bytes)))
+                  self.end_headers()
+                  self.wfile.write(signed_bytes)
+
+              def log_message(self, *args):
+                  pass
+
+          with HTTPServer(('127.0.0.1', 0), DownloadHandler) as server:
+              server.timeout = 10
+              worker = Thread(target=server.handle_request, daemon=True)
+              worker.start()
+              with closing(HTTPConnection('127.0.0.1', server.server_port, timeout=10)) as client:
+                  client.request('GET', '/Tideline.exe')
+                  with client.getresponse() as response:
+                      if response.status != 200:
+                          raise RuntimeError(f'Tideline download returned HTTP {response.status}')
+                      download.write_bytes(response.read())
+                      print(response.status)
+              worker.join(timeout=10)
+              if worker.is_alive():
+                  raise RuntimeError('Tideline download server did not stop')
+          '@ | python - $executable $download
+            if ($LASTEXITCODE -ne 0 -or $httpStatus -cne '200') { throw 'Tideline loopback download failed.' }
+
+            $downloadHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $download).Hash
+            if ($downloadHash -cne $signedHash) { throw 'Downloaded bytes differ from the signed executable.' }
+            Assert-FixtureSignature $download $certificateHash
+
+            $pe = [Reflection.PortableExecutable.PEReader]::new([IO.File]::OpenRead($download))
+            try {
+              if ($pe.PEHeaders.CoffHeader.Machine -ne 'Amd64' -or $pe.PEHeaders.PEHeader.Magic -ne 'PE32Plus') {
+                throw 'The downloaded executable is not x64.'
+              }
+            } finally {
+              $pe.Dispose()
+            }
+            $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($download)
+            $fileVersion = '{0}.{1}.{2}.{3}' -f $version.FileMajorPart, $version.FileMinorPart, $version.FileBuildPart, $version.FilePrivatePart
+            $downloadBundle = Get-BundleProof $download
+            if ($downloadBundle.bundle_sha256 -cne $originalBundle.bundle_sha256 -or
+                $downloadBundle.version -cne $originalBundle.version -or $downloadBundle.version -cne $fileVersion) {
+              throw 'Downloaded bundle proof differs from the build or Windows file version.'
+            }
+
+            $proof = [ordered]@{
+              source_sha = $downloadBundle.source_sha
+              bundle_sha256 = $downloadBundle.bundle_sha256
+              signed_sha256 = $signedHash.ToLowerInvariant()
+              download_sha256 = $downloadHash.ToLowerInvariant()
+              certificate_sha256 = $certificateHash.ToLowerInvariant()
+              windows_signature = 'Valid'
+              package_version = $fileVersion
+              arch = 'x64'
+              http_status = [int] $httpStatus
+            }
+          } finally {
+            $cleanupErrors = @()
+            if ($trustAttempted) {
+              try { $rootStore.Remove($publicSigner) } catch { $cleanupErrors += 'fixture trust' }
+            }
+            if ($null -ne $rootStore) { $rootStore.Dispose() }
+            if ($null -ne $publicSigner) { $publicSigner.Dispose() }
+            if ($null -ne $signer) {
+              try { Remove-Item -Path "Cert:\CurrentUser\My\$($signer.Thumbprint)" -DeleteKey }
+              catch { $cleanupErrors += 'fixture certificate and key' }
+              $signer.Dispose()
+            }
+            try {
+              foreach ($path in @($executable, $download)) {
+                if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path }
+              }
+              [IO.Directory]::Delete($scratch)
+            } catch { $cleanupErrors += 'scratch files' }
+            if ($cleanupErrors.Count -gt 0) { throw "Failed to clean up $($cleanupErrors -join ', ')." }
+          }
+          Write-Output "KPOOL_WINDOWS_SIGNATURE_OK $($proof | ConvertTo-Json -Compress)"
