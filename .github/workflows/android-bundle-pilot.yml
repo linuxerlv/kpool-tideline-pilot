@@ -11,6 +11,10 @@ on:
         description: Next reserved Android versionCode
         required: true
         type: string
+      retain_bundles:
+        description: Retain the two verified signed AABs for one day
+        type: boolean
+        default: false
 
 permissions: {}
 
@@ -49,4 +53,15 @@ jobs:
         env:
           FIRST_BUILD: ${{ inputs.first_build }}
           SECOND_BUILD: ${{ inputs.second_build }}
+          RETAIN_BUNDLES: ${{ inputs.retain_bundles }}
         run: bash scripts/verify_android_pilot.sh "$FIRST_BUILD" "$SECOND_BUILD"
+      - name: Upload verified signed Android bundles
+        if: ${{ success() && inputs.retain_bundles }}
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: tideline-android-aabs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/tideline-android-aabs/${{ inputs.first_build }}.aab
+            ${{ runner.temp }}/tideline-android-aabs/${{ inputs.second_build }}.aab
+          if-no-files-found: error
+          retention-days: 1

@@ -9,6 +9,8 @@ fail() { printf '%s\n' "$*" >&2; exit 1; }
 (( $2 <= 2100000000 && $2 == $1 + 1 )) ||
     fail 'Expected two consecutive Android versionCodes at or below 2100000000.'
 versions=("$1" "$2")
+retain_bundles=${RETAIN_BUNDLES:-false}
+[[ $retain_bundles == true || $retain_bundles == false ]] || fail 'Expected a boolean retain_bundles input.'
 [[ ${GITHUB_SHA:-} =~ ^[0-9a-f]{40}$ && $(git rev-parse HEAD) == "$GITHUB_SHA" ]] ||
     fail 'Checkout SHA differs from the workflow SHA.'
 
@@ -231,3 +233,9 @@ report=$(jq -cs --arg source_sha "$GITHUB_SHA" --arg package "$package" --arg bu
     --arg certificate_sha256 "$certificate_sha256" \
     '{source_sha: $source_sha, package: $package, bundle_sha256: $bundle_sha256, certificate_sha256: $certificate_sha256, builds: .}' \
     "$scratch/builds.jsonl")
+
+if [[ $retain_bundles == true ]]; then
+    export_dir="$RUNNER_TEMP/tideline-android-aabs"
+    mkdir -- "$export_dir"
+    cp -- "$scratch/${versions[0]}.aab" "$scratch/${versions[1]}.aab" "$export_dir/"
+fi
