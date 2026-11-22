@@ -1,0 +1,17 @@
+{
+  "schema_version": 2,
+  "target_id": "tgt_7050840cada84162857b0390e1b7d685",
+  "exclusive": true,
+  "workflows": {
+    ".github/workflows/android-bundle-pilot.yml": "sha256:860737756f77482a38f69faa639293218cb9d6e59ee73bbba1a2a185a1f9ddd2",
+    ".github/workflows/cancellation-pilot.yml": "sha256:e4344ab847e52088ebfdd38c053ab90a7f92f95210578f427295bb6a58f7da44",
+    ".github/workflows/checks.yml": "sha256:a2383bc6323c550a1b6019fb28eed836592da242bbecc8f8ede6b86ec8ddf21f",
+    ".github/workflows/ghcr-pilot.yml": "sha256:5c9616f6433d2aba8cc7624c40e40af811fb906278a9b03517b3decddb1c4d80",
+    ".github/workflows/oidc-probe.yml": "sha256:9d088e8e0d71c9edbf4449bb578a1e6c4c1098914179844d9915a22e81e6e523",
+    ".github/workflows/windows-signature-pilot.yml": "sha256:74ea5557d699c038bc359766e541dada7db74bdb37e04e6a6839d041c8e37bfe"
+  },
+  "retired_writers": [
+    ".github/workflows/ghcr-pilot.yml",
+    ".github/workflows/oidc-probe.yml"
+  ]
+}
