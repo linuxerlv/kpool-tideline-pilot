@@ -1,0 +1,32 @@
+# Managed by kpool for target tgt_26a833c41ec04a81b1139cbc1287636a
+name: kpool bootstrap
+on:
+  pull_request:
+    branches: ["codex/kpool-w05-efb77817e53e483e"]
+    types: [opened, synchronize, reopened]
+permissions: {}
+jobs:
+  build:
+    if: github.repository_id == '1466251904' && github.event.pull_request.head.repo.id == github.event.pull_request.base.repo.id
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Build and test the reviewed configuration
+        env:
+          KPOOL_REVIEW_HEAD: ${{ github.event.pull_request.head.sha }}
+          KPOOL_SOURCE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: python3 .kpool/tgt_26a833c41ec04a81b1139cbc1287636a/bootstrap.py
+      - name: Retain build evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: kpool-bootstrap-${{ github.run_attempt }}
+          path: '${{ runner.temp }}/kpool-bootstrap'
+          if-no-files-found: error
+          retention-days: 7
