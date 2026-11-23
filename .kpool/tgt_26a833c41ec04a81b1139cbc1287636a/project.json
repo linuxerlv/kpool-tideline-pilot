@@ -1,0 +1,4 @@
+{
+  "context": ".",
+  "dockerfile": "checkout/Dockerfile"
+}
