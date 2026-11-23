@@ -1,4 +1,4 @@
 {
-  "context": ".",
-  "dockerfile": "checkout/Dockerfile"
+  "context": "checkout",
+  "dockerfile": "Dockerfile"
 }
