@@ -1,7 +1,0 @@
-*
-!Dockerfile
-!nginx.conf
-!index.html
-!styles.css
-!game.mjs
-!game-engine.mjs

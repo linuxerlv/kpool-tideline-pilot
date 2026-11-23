@@ -1,8 +1,0 @@
-services:
-  web:
-    image: "${KPOOL_IMAGE:?set the reviewed image reference}"
-    ports:
-      - "127.0.0.1:${KPOOL_SLOT_PORT:?set the slot port}:80"
-    labels:
-      io.kpool.config-revision: "${KPOOL_CONFIG_REVISION:?set the reviewed configuration revision}"
-    restart: unless-stopped
